@@ -1,0 +1,14 @@
+{
+  "name": "Diagnostic A - Local Iframe",
+  "version": "1.0.0",
+  "manifest_version": 1,
+  "description": "Comparador estático sem SDK para validar iframe local.",
+  "icon": "/diagnostics/icon.svg",
+  "action": {
+    "title": "Local Iframe Test",
+    "icon": "/diagnostics/icon.svg",
+    "popover": "/diagnostics/case-a/panel.html",
+    "width": 320,
+    "height": 160
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "Cinematic Sync POC",
+  "version": "0.1.0",
+  "manifest_version": 1,
+  "description": "POC de cinemática MP4 sincronizada em modal fullscreen.",
+  "icon": "/icon.svg",
+  "background_url": "/background.html",
+  "permissions": [
+    {
+      "name": "autoplay",
+      "reason": "Tentar iniciar a faixa de áudio integrada ao vídeo após o comando sincronizado do GM."
+    },
+    {
+      "name": "clipboard-write",
+      "reason": "Permitir ao GM copiar o diagnóstico técnico da POC."
+    }
+  ]
+}

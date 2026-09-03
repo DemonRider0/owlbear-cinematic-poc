@@ -1,0 +1,7 @@
+Coloque o MP4 definitivo neste diretório com o nome:
+
+cinematic.mp4
+
+Formato esperado pela POC: vídeo H.264 e áudio AAC em um único arquivo MP4.
+Ao substituir o arquivo após um teste, incremente CINEMATIC_CACHE_VERSION em
+src/config.ts para invalidar explicitamente a entrada do Cache Storage.

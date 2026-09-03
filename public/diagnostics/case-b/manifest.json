@@ -1,0 +1,6 @@
+{
+  "name": "Diagnostic B - Minimal SDK",
+  "version": "1.0.0",
+  "manifest_version": 1,
+  "background_url": "/diagnostics/case-b/background.html"
+}

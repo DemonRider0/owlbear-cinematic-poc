@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Controle de Cinemática</title>
+    <link rel="stylesheet" href="./src/controls.css" />
+  </head>
+  <body class="booting">
+    <main id="controls" aria-live="polite">
+      <h1>Cinemática</h1>
+      <p id="ready-count">Prontos: 0 / 0</p>
+      <p id="sync-count" class="secondary">Sincronizados: 0 / 0</p>
+      <ul id="client-list"></ul>
+      <p id="policy-message" class="policy"></p>
+      <button id="play-button" type="button" disabled>REPRODUZIR</button>
+
+      <details>
+        <summary>Diagnóstico técnico</summary>
+        <textarea id="diagnostics" readonly spellcheck="false"></textarea>
+        <button id="copy-diagnostics" class="secondary-button" type="button">
+          Copiar diagnóstico
+        </button>
+        <span id="copy-result" role="status"></span>
+      </details>
+    </main>
+    <script type="module" src="./src/controls.ts"></script>
+  </body>
+</html>
