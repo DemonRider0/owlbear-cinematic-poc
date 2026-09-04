@@ -1,9 +1,9 @@
-export const EXTENSION_ID = "dev.cinematic-sync.poc";
+export const EXTENSION_ID = "demonrider.cinematic-sync";
 
 // Relative to each built HTML entry so local development and a GitHub Pages
 // project subpath resolve to the same asset.
 export const CINEMATIC_URL = "./assets/cinematic.mp4";
-export const CINEMATIC_CACHE_VERSION = "poc-1";
+export const CINEMATIC_CACHE_VERSION = "v1";
 export const CINEMATIC_CACHE_PREFIX = `${EXTENSION_ID}/media/`;
 export const CINEMATIC_CACHE_NAME =
   `${CINEMATIC_CACHE_PREFIX}${CINEMATIC_CACHE_VERSION}`;

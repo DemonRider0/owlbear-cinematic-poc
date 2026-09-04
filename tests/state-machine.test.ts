@@ -21,7 +21,7 @@ describe("client state machine", () => {
   it("rejects impossible combinations", () => {
     expect(canTransition("LOADING", "PLAYING")).toBe(false);
     expect(() => transition("READY", "FADING_OUT")).toThrow(
-      "Invalid client phase transition",
+      "Transição inválida de estado do cliente",
     );
   });
 

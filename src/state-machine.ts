@@ -32,7 +32,7 @@ export function canTransition(from: ClientPhase, to: ClientPhase): boolean {
 
 export function transition(from: ClientPhase, to: ClientPhase): ClientPhase {
   if (!canTransition(from, to)) {
-    throw new Error(`Invalid client phase transition: ${from} -> ${to}`);
+    throw new Error(`Transição inválida de estado do cliente: ${from} -> ${to}`);
   }
 
   return to;

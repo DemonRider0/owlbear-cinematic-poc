@@ -3,13 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="author" content="DemonRider" />
     <title>Controle de Cinemática</title>
     <link rel="stylesheet" href="./src/controls.css" />
   </head>
   <body class="booting">
     <main id="controls" aria-live="polite">
       <h1>Cinemática</h1>
-      <p id="ready-count">Prontos: 0 / 0</p>
+      <p id="overall-state" class="overall-state">Estado: Preparando…</p>
+      <p id="ready-count">Clientes prontos: 0 / 0</p>
       <p id="sync-count" class="secondary">Sincronizados: 0 / 0</p>
       <ul id="client-list"></ul>
       <p id="policy-message" class="policy"></p>

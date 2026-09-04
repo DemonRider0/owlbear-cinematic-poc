@@ -37,6 +37,7 @@ function requiredElement<T extends Element>(selector: string): T {
 }
 
 const readyCount = requiredElement<HTMLElement>("#ready-count");
+const overallState = requiredElement<HTMLElement>("#overall-state");
 const syncCount = requiredElement<HTMLElement>("#sync-count");
 const clientList = requiredElement<HTMLUListElement>("#client-list");
 const policyMessage = requiredElement<HTMLElement>("#policy-message");
@@ -91,10 +92,10 @@ function phaseLabel(status: StoredStatus | undefined): string {
   const labels: Record<StoredStatus["phase"], string> = {
     LOADING: "preparando",
     READY: "pronto",
-    ARMED: "armado",
-    FADING_IN: "fade-in",
-    PLAYING: "reproduzindo",
-    FADING_OUT: "fade-out",
+    ARMED: "aguardando início",
+    FADING_IN: "iniciando",
+    PLAYING: "em reprodução",
+    FADING_OUT: "encerrando",
     IDLE: "pronto",
     ERROR: "erro",
   };
@@ -146,6 +147,9 @@ function render(): void {
   const allMediaReady = participantList.length > 0 && readyTotal === participantList.length;
   const allClocksReady =
     participantList.length > 0 && synchronizedTotal === participantList.length;
+  const hasError = participantList.some(
+    (participant) => statuses.get(participant.connectionId)?.phase === "ERROR",
+  );
   if (
     activePlayRequestId &&
     participantList.every((participant) => {
@@ -160,7 +164,17 @@ function render(): void {
     activePlayRequestId = undefined;
   }
 
-  readyCount.textContent = `Prontos: ${readyTotal} / ${participantList.length}`;
+  if (hasError) {
+    overallState.textContent = "Estado: Erro";
+  } else if (activePlayRequestId) {
+    overallState.textContent = "Estado: Em reprodução";
+  } else if (allMediaReady && allClocksReady) {
+    overallState.textContent = "Estado: Pronta";
+  } else {
+    overallState.textContent = "Estado: Preparando…";
+  }
+
+  readyCount.textContent = `Clientes prontos: ${readyTotal} / ${participantList.length}`;
   syncCount.textContent = `Sincronizados: ${synchronizedTotal} / ${participantList.length}`;
   clientList.replaceChildren();
 
@@ -181,7 +195,9 @@ function render(): void {
     clientList.append(item);
   }
 
-  if (!allMediaReady) {
+  if (hasError) {
+    policyMessage.textContent = "Há clientes com erro. Consulte o diagnóstico técnico.";
+  } else if (!allMediaReady) {
     policyMessage.textContent = "Reprodução bloqueada até todos os clientes estarem prontos.";
   } else if (!allClocksReady) {
     policyMessage.textContent = "Mídia pronta; aguardando sincronização automática dos relógios.";
@@ -250,7 +266,7 @@ async function lockOutNonGm(): Promise<void> {
   try {
     await OBR.popover.close(CONTROL_POPOVER_ID);
   } catch (error) {
-    console.warn("[cinematic-poc] Não foi possível fechar o painel não autorizado.", error);
+    console.warn("[cinematic-sync] Não foi possível fechar o painel não autorizado.", error);
   }
 }
 
@@ -324,10 +340,10 @@ async function initialize(): Promise<void> {
   });
   OBR.party.onChange((players) => {
     void refreshParticipants(players).catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha ao atualizar clientes do painel.", error);
+      console.error("[cinematic-sync] Falha ao atualizar clientes do painel.", error);
     });
     void sendHello().catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha ao solicitar status após Party change.", error);
+      console.error("[cinematic-sync] Falha ao solicitar status após alteração da Party.", error);
     });
   });
   OBR.player.onChange((player) => {
@@ -337,7 +353,7 @@ async function initialize(): Promise<void> {
   });
   playButton.addEventListener("click", () => {
     void dispatchPlay().catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha ao enviar PLAY.", error);
+      console.error("[cinematic-sync] Falha ao enviar PLAY.", error);
     });
   });
   copyButton.addEventListener("click", () => {
@@ -349,13 +365,13 @@ async function initialize(): Promise<void> {
   await sendHello();
   window.setInterval(() => {
     void sendHello().catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha ao atualizar status dos clientes.", error);
+      console.error("[cinematic-sync] Falha ao atualizar status dos clientes.", error);
     });
   }, STATUS_REFRESH_INTERVAL_MS);
 }
 
 OBR.onReady(() => {
   void initialize().catch((error: unknown) => {
-    console.error("[cinematic-poc] Inicialização do painel falhou.", error);
+    console.error("[cinematic-sync] Inicialização do painel falhou.", error);
   });
 });

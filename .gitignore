@@ -3,3 +3,8 @@ dist/
 .npm-cache/
 coverage/
 *.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

@@ -124,7 +124,7 @@ async function syncGmTool(role: "GM" | "PLAYER"): Promise<void> {
       ],
       async onClick(_context, elementId) {
         if ((await OBR.player.getRole()) !== "GM") {
-          console.warn("[cinematic-poc] Abertura do painel ignorada: cliente não é GM.");
+          console.warn("[cinematic-sync] Abertura do painel ignorada: cliente não é GM.");
           return false;
         }
 
@@ -199,7 +199,7 @@ function beginClockSyncIfNeeded(preferredConnectionId?: string): void {
     window.setTimeout(() => {
       if (generation === clockSyncGeneration) {
         void sendClockPing(targetConnectionId).catch((error: unknown) => {
-          console.error("[cinematic-poc] Falha na amostra de relógio.", error);
+          console.error("[cinematic-sync] Falha na amostra de relógio.", error);
         });
       }
     }, index * CLOCK_SYNC_SAMPLE_INTERVAL_MS);
@@ -283,9 +283,9 @@ function localStartTime(message: PlayMessage, gmConnectionId: string): number {
       ? clockDiagnostics.offsetGmMinusLocalMs
       : undefined;
 
-  // A clock sample may be unavailable for a just-joined client. Preserve the
-  // small automatic margin without assuming equal wall clocks; diagnostics make
-  // this fallback visible to the GM.
+  // Uma amostra de relógio pode não estar disponível para um cliente recém-chegado.
+  // A margem automática é preservada sem presumir relógios iguais; o diagnóstico
+  // torna esse fallback visível para o GM.
   return calculateLocalStartAt(
     message.startAtGm,
     message.issuedAt,
@@ -299,7 +299,7 @@ async function openCinematic(
   gmConnectionId: string,
 ): Promise<void> {
   if (!isReadyForPlayback(phase)) {
-    console.warn(`[cinematic-poc] PLAY ignorado no estado ${phase}.`);
+    console.warn(`[cinematic-sync] PLAY ignorado no estado ${phase}.`);
     return;
   }
 
@@ -373,7 +373,7 @@ async function handleProtocolEvent(event: {
         await openCinematic(message, event.connectionId);
       } else {
         console.warn(
-          `[cinematic-poc] PLAY não autorizado ignorado (${event.connectionId}).`,
+          `[cinematic-sync] PLAY não autorizado ignorado (${event.connectionId}).`,
         );
       }
       break;
@@ -403,7 +403,7 @@ async function runPreload(): Promise<void> {
     diagnostics = mergeDiagnostics(diagnostics, {
       error: { stage: "PRELOAD", ...serialized },
     });
-    console.error("[cinematic-poc] Preload falhou.", error);
+    console.error("[cinematic-sync] Preload falhou.", error);
   }
   await sendStatus();
 }
@@ -420,12 +420,12 @@ async function initialize(): Promise<void> {
 
   OBR.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
     void handleProtocolEvent(event).catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha ao processar broadcast.", error);
+      console.error("[cinematic-sync] Falha ao processar broadcast.", error);
     });
   });
   OBR.party.onChange((updatedPlayers) => {
     void refreshParty(updatedPlayers).catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha ao atualizar Party.", error);
+      console.error("[cinematic-sync] Falha ao atualizar Party.", error);
     });
   });
   OBR.player.onChange((player) => {
@@ -435,7 +435,7 @@ async function initialize(): Promise<void> {
       role: player.role,
     };
     void syncGmTool(player.role).catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha ao atualizar a Tool do GM.", error);
+      console.error("[cinematic-sync] Falha ao atualizar a Tool do GM.", error);
     });
     beginClockSyncIfNeeded();
   });
@@ -448,6 +448,6 @@ async function initialize(): Promise<void> {
 
 OBR.onReady(() => {
   void initialize().catch((error: unknown) => {
-    console.error("[cinematic-poc] Inicialização do background falhou.", error);
+    console.error("[cinematic-sync] Inicialização do background falhou.", error);
   });
 });

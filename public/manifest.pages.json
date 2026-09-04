@@ -1,8 +1,9 @@
 {
-  "name": "Cinematic Sync POC - Pages Test",
-  "version": "0.1.0",
+  "name": "Cinemática Sincronizada",
+  "version": "1.0.0",
   "manifest_version": 1,
-  "description": "POC de cinemática MP4 sincronizada para teste HTTPS via GitHub Pages.",
+  "description": "Reproduz uma cinemática com áudio de forma sincronizada para todos os participantes da sala.",
+  "author": "DemonRider",
   "icon": "https://demonrider0.github.io/owlbear-cinematic-poc/icon.svg",
   "background_url": "https://demonrider0.github.io/owlbear-cinematic-poc/background.html",
   "permissions": [
@@ -12,7 +13,7 @@
     },
     {
       "name": "clipboard-write",
-      "reason": "Permitir ao GM copiar o diagnóstico técnico da POC."
+      "reason": "Permitir ao GM copiar informações técnicas para suporte."
     }
   ]
 }

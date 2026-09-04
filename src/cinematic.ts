@@ -92,7 +92,7 @@ async function closeModalWithRetry(): Promise<void> {
     await OBR.modal.close(CINEMATIC_MODAL_ID);
     return;
   } catch (firstError) {
-    console.error("[cinematic-poc] Primeira tentativa de fechar o modal falhou.", firstError);
+    console.error("[cinematic-sync] Primeira tentativa de fechar o modal falhou.", firstError);
   }
 
   await delay(MODAL_CLOSE_RETRY_MS);
@@ -108,7 +108,7 @@ async function closeModalWithRetry(): Promise<void> {
       error: { stage: "MODAL_CLOSE", ...serialized },
     };
     await sendStatus();
-    console.error("[cinematic-poc] Modal não pôde ser fechado.", error);
+    console.error("[cinematic-sync] Modal não pôde ser fechado.", error);
   }
 }
 
@@ -275,14 +275,14 @@ async function startPlayback(startAtLocal: number): Promise<void> {
         playback: { ...diagnostics.playback, playingEventAt: Date.now() },
       };
       void sendStatus().catch((error: unknown) => {
-        console.error("[cinematic-poc] Falha ao reportar evento playing.", error);
+        console.error("[cinematic-sync] Falha ao reportar evento playing.", error);
       });
     },
     { once: true },
   );
 
-  // Deliberately audible: no muted flag and no volume manipulation. The single
-  // play() call starts the MP4 video and its embedded AAC track together.
+  // Reprodução audível: sem muted e sem manipulação de volume. A chamada única
+  // de play() inicia o vídeo MP4 e sua faixa AAC integrada em conjunto.
   const playPromise = video.play();
   layer.classList.add("visible");
 
@@ -335,13 +335,13 @@ async function initialize(): Promise<void> {
 
   video.addEventListener("ended", () => {
     void finishNormally().catch((error: unknown) => {
-      console.error("[cinematic-poc] Falha no encerramento normal.", error);
+      console.error("[cinematic-sync] Falha no encerramento normal.", error);
     });
   });
   video.addEventListener("error", () => {
     void closeWithError("PLAYBACK", new Error(mediaErrorDescription())).catch(
       (error: unknown) => {
-        console.error("[cinematic-poc] Falha no tratamento de erro de mídia.", error);
+        console.error("[cinematic-sync] Falha no tratamento de erro de mídia.", error);
       },
     );
   });

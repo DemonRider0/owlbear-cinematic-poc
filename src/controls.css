@@ -29,6 +29,10 @@ h1 {
   font-size: 20px;
 }
 
+.overall-state {
+  font-weight: 600;
+}
+
 p {
   margin: 5px 0;
 }

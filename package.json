@@ -1,6 +1,8 @@
 {
-  "name": "owlbear-synced-cinematic-poc",
-  "version": "0.1.0",
+  "name": "owlbear-cinematic-sync",
+  "version": "1.0.0",
+  "description": "Extensão para reprodução sincronizada de uma cinemática no Owlbear Rodeo.",
+  "author": "DemonRider",
   "private": true,
   "type": "module",
   "scripts": {

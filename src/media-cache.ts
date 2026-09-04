@@ -63,8 +63,8 @@ async function fetchAndStoreCompleteResponse(
       );
     }
 
-    // Cache.put consumes the complete response body before resolving. READY is
-    // never based only on response headers or media metadata.
+    // Cache.put consome o corpo completo da resposta antes de concluir. READY
+    // nunca se baseia apenas em cabeçalhos ou metadados da mídia.
     await cache.put(request, response);
 
     const stored = await cache.match(request);
