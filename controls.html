@@ -9,13 +9,50 @@
   </head>
   <body class="booting">
     <main id="controls" aria-live="polite">
-      <h1>Cinemática</h1>
-      <p id="overall-state" class="overall-state">Estado: Preparando…</p>
-      <p id="ready-count">Clientes prontos: 0 / 0</p>
-      <p id="sync-count" class="secondary">Sincronizados: 0 / 0</p>
-      <ul id="client-list"></ul>
-      <p id="policy-message" class="policy"></p>
-      <button id="play-button" type="button" disabled>REPRODUZIR</button>
+      <h1>Cinemática Sincronizada</h1>
+
+      <section class="music-panel" aria-labelledby="music-heading">
+        <h2 id="music-heading">Música</h2>
+        <p id="music-current" class="music-current">Carregando faixas…</p>
+        <div class="music-transport">
+          <button
+            id="music-toggle"
+            class="music-toggle"
+            type="button"
+            aria-label="Reproduzir música"
+            disabled
+          >
+            ▶
+          </button>
+          <span id="music-current-time" class="music-time">00:00</span>
+          <input
+            id="music-progress"
+            type="range"
+            min="0"
+            max="1"
+            step="0.1"
+            value="0"
+            aria-label="Posição da música"
+            disabled
+          />
+          <span id="music-duration" class="music-time">00:00</span>
+        </div>
+        <div id="music-track-list" class="music-track-list" aria-label="Faixas">
+          <button type="button" data-track-id="o-porao" disabled>O Porão</button>
+          <button type="button" data-track-id="o-idolo" disabled>O Ídolo</button>
+        </div>
+        <p id="music-status" class="secondary">Aguardando estado sincronizado…</p>
+      </section>
+
+      <section class="cinematic-panel" aria-labelledby="cinematic-heading">
+        <h2 id="cinematic-heading">Cinemática</h2>
+        <p id="overall-state" class="overall-state">Estado: Preparando…</p>
+        <p id="ready-count">Clientes prontos: 0 / 0</p>
+        <p id="sync-count" class="secondary">Sincronizados: 0 / 0</p>
+        <ul id="client-list"></ul>
+        <p id="policy-message" class="policy"></p>
+        <button id="play-button" type="button" disabled>REPRODUZIR</button>
+      </section>
 
       <details>
         <summary>Diagnóstico técnico</summary>

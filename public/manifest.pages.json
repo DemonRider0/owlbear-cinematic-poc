@@ -1,15 +1,15 @@
 {
   "name": "Cinemática Sincronizada",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "manifest_version": 1,
-  "description": "Reproduz uma cinemática com áudio de forma sincronizada para todos os participantes da sala.",
+  "description": "Reproduz uma cinemática e músicas de forma sincronizada para todos os participantes da sala.",
   "author": "DemonRider",
   "icon": "https://demonrider0.github.io/owlbear-cinematic-poc/icon.svg",
   "background_url": "https://demonrider0.github.io/owlbear-cinematic-poc/background.html",
   "permissions": [
     {
       "name": "autoplay",
-      "reason": "Tentar iniciar a faixa de áudio integrada ao vídeo após o comando sincronizado do GM."
+      "reason": "Iniciar a cinemática e as músicas após os comandos sincronizados do GM."
     },
     {
       "name": "clipboard-write",

@@ -7,11 +7,24 @@ import {
   CLOCK_SYNC_SAMPLE_INTERVAL_MS,
   CONTROL_POPOVER_ID,
   getCinematicRequestUrl,
+  MUSIC_COMMAND_DELAY_MS,
+  MUSIC_DRIFT_CHECK_INTERVAL_MS,
+  MUSIC_ROOM_METADATA_KEY,
   resolveAppUrl,
   TOOL_ID,
 } from "./config";
 import { toSerializableError } from "./errors";
 import { preloadCinematic } from "./media-cache";
+import { MusicPlayer } from "./music-player";
+import {
+  compareMusicStates,
+  createInitialMusicState,
+  createManualMusicState,
+  isCinematicMusicLocked,
+  isMusicState,
+  musicPositionAtGm,
+  type MusicState,
+} from "./music-state";
 import {
   isProtocolMessage,
   protocolMessage,
@@ -20,6 +33,9 @@ import {
   type ClockDiagnostics,
   type ClockPingMessage,
   type ClockPongMessage,
+  type MusicControlMessage,
+  type MusicStateMessage,
+  type MusicStateRequestMessage,
   type PlayMessage,
 } from "./protocol";
 import {
@@ -46,6 +62,9 @@ let clockSyncGeneration = 0;
 let clockSyncTarget: string | undefined;
 let preferredGmConnectionId: string | undefined;
 let validClockSamples = 0;
+let musicPlayer: MusicPlayer | undefined;
+let musicState: MusicState | undefined;
+let musicHydrationPromise: Promise<void> | undefined;
 const pendingClockPings = new Map<string, number>();
 
 function mergeDiagnostics(
@@ -132,7 +151,7 @@ async function syncGmTool(role: "GM" | "PLAYER"): Promise<void> {
           id: CONTROL_POPOVER_ID,
           url: resolveAppUrl("./controls.html"),
           width: 380,
-          height: 540,
+          height: 720,
           anchorElementId: elementId,
           anchorOrigin: { horizontal: "LEFT", vertical: "CENTER" },
           transformOrigin: { horizontal: "RIGHT", vertical: "CENTER" },
@@ -182,6 +201,7 @@ function beginClockSyncIfNeeded(preferredConnectionId?: string): void {
       roundTripMs: 0,
       samples: CLOCK_SYNC_SAMPLE_COUNT,
     };
+    applyMusicStateIfClockReady();
     return;
   }
 
@@ -275,6 +295,228 @@ async function handleClockPong(
   }
 
   await sendStatus();
+  applyMusicStateIfClockReady();
+}
+
+function musicClockReady(state: MusicState): boolean {
+  return (
+    state.authorityConnectionId === identity.connectionId ||
+    clockDiagnostics?.gmConnectionId === state.authorityConnectionId
+  );
+}
+
+function gmNowForMusic(): number {
+  const authorityConnectionId = musicState?.authorityConnectionId;
+  const offset =
+    authorityConnectionId &&
+    authorityConnectionId !== identity.connectionId &&
+    clockDiagnostics?.gmConnectionId === authorityConnectionId
+      ? clockDiagnostics.offsetGmMinusLocalMs
+      : 0;
+  return Date.now() + offset;
+}
+
+function localTimeForMusic(gmTime: number, issuedAtGm: number): number {
+  const authorityConnectionId = musicState?.authorityConnectionId;
+  const offset =
+    authorityConnectionId &&
+    clockDiagnostics?.gmConnectionId === authorityConnectionId
+      ? clockDiagnostics.offsetGmMinusLocalMs
+      : authorityConnectionId === identity.connectionId
+        ? 0
+        : undefined;
+  return calculateLocalStartAt(gmTime, issuedAtGm, Date.now(), offset);
+}
+
+function applyMusicStateIfClockReady(): void {
+  if (musicState && musicPlayer && musicClockReady(musicState)) {
+    musicPlayer.applyState(musicState);
+  }
+}
+
+async function acceptMusicState(
+  candidate: MusicState,
+  senderConnectionId?: string,
+): Promise<boolean> {
+  if (
+    senderConnectionId !== undefined &&
+    (candidate.authorityConnectionId !== senderConnectionId ||
+      !(await isGmConnection(senderConnectionId)))
+  ) {
+    console.warn(
+      `[cinematic-sync] Estado musical não autorizado ignorado (${senderConnectionId}).`,
+    );
+    return false;
+  }
+  if (
+    senderConnectionId === undefined &&
+    !(await isGmConnection(candidate.authorityConnectionId))
+  ) {
+    return false;
+  }
+  if (musicState && compareMusicStates(candidate, musicState) <= 0) {
+    return false;
+  }
+
+  musicState = candidate;
+  beginClockSyncIfNeeded(candidate.authorityConnectionId);
+  applyMusicStateIfClockReady();
+  return true;
+}
+
+async function persistMusicState(state: MusicState): Promise<void> {
+  if (
+    identity.role !== "GM" ||
+    state.authorityConnectionId !== identity.connectionId
+  ) {
+    return;
+  }
+  await OBR.room.setMetadata({ [MUSIC_ROOM_METADATA_KEY]: state });
+}
+
+async function broadcastMusicState(
+  state: MusicState,
+  requestId?: string,
+  targetConnectionId?: string,
+): Promise<void> {
+  const message = protocolMessage<MusicStateMessage>({
+    kind: "MUSIC_STATE",
+    requestId,
+    targetConnectionId,
+    issuedAt: Date.now(),
+    state,
+  });
+  await OBR.broadcast.sendMessage(BROADCAST_CHANNEL, message, {
+    destination: "ALL",
+  });
+}
+
+async function publishMusicState(
+  state: MusicState,
+  requestId?: string,
+): Promise<void> {
+  const accepted = await acceptMusicState(state, identity.connectionId);
+  if (!accepted) {
+    return;
+  }
+  const results = await Promise.allSettled([
+    persistMusicState(state),
+    broadcastMusicState(state, requestId),
+  ]);
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("[cinematic-sync] Falha ao publicar estado musical.", result.reason);
+    }
+  }
+}
+
+async function ensureInitialGmMusicState(): Promise<void> {
+  if (identity.role !== "GM") {
+    return;
+  }
+  if (musicState) {
+    if (
+      musicState.authorityConnectionId === identity.connectionId ||
+      (await isGmConnection(musicState.authorityConnectionId))
+    ) {
+      return;
+    }
+
+    const nowGm = Date.now();
+    const projectedPosition = musicPositionAtGm(musicState, gmNowForMusic());
+    const takeover: MusicState = {
+      schemaVersion: musicState.schemaVersion,
+      stateId: crypto.randomUUID(),
+      revision: musicState.revision + 1,
+      authorityConnectionId: identity.connectionId,
+      updatedAtGm: Math.max(nowGm, musicState.updatedAtGm + 1),
+      mode: "MANUAL",
+      trackId: musicState.trackId,
+      playing: musicState.playing,
+      positionSeconds: projectedPosition,
+      anchorAtGm: nowGm,
+    };
+    await publishMusicState(takeover);
+    return;
+  }
+  const initial = createInitialMusicState(
+    identity.connectionId,
+    crypto.randomUUID(),
+    Date.now(),
+  );
+  await publishMusicState(initial);
+}
+
+async function handleMusicControl(
+  message: MusicControlMessage,
+  senderConnectionId: string,
+): Promise<void> {
+  await musicHydrationPromise;
+  if (
+    identity.role !== "GM" ||
+    senderConnectionId !== identity.connectionId
+  ) {
+    return;
+  }
+  if (!(await isGmConnection(senderConnectionId))) {
+    console.warn(
+      `[cinematic-sync] Controle musical não autorizado ignorado (${senderConnectionId}).`,
+    );
+    return;
+  }
+
+  await ensureInitialGmMusicState();
+  if (!musicState) {
+    return;
+  }
+  const issuedAtGm = Date.now();
+  if (isCinematicMusicLocked(musicState, issuedAtGm)) {
+    await broadcastMusicState(musicState, message.requestId, senderConnectionId);
+    return;
+  }
+  const next = createManualMusicState(
+    musicState,
+    message.action,
+    identity.connectionId,
+    crypto.randomUUID(),
+    issuedAtGm,
+    issuedAtGm + MUSIC_COMMAND_DELAY_MS,
+  );
+  await publishMusicState(next, message.requestId);
+}
+
+async function handleMusicStateRequest(
+  message: MusicStateRequestMessage,
+  senderConnectionId: string,
+): Promise<void> {
+  await musicHydrationPromise;
+  if (identity.role !== "GM") {
+    return;
+  }
+  await ensureInitialGmMusicState();
+  if (musicState) {
+    if (musicState.authorityConnectionId !== identity.connectionId) {
+      return;
+    }
+    await broadcastMusicState(
+      musicState,
+      message.requestId,
+      senderConnectionId,
+    );
+  }
+}
+
+async function handleMusicStateMessage(
+  message: MusicStateMessage,
+  senderConnectionId: string,
+): Promise<void> {
+  if (
+    message.targetConnectionId !== undefined &&
+    message.targetConnectionId !== identity.connectionId
+  ) {
+    return;
+  }
+  await acceptMusicState(message.state, senderConnectionId);
 }
 
 function localStartTime(message: PlayMessage, gmConnectionId: string): number {
@@ -364,18 +606,53 @@ async function handleProtocolEvent(event: {
   switch (message.kind) {
     case "HELLO":
       if (await isGmConnection(event.connectionId)) {
-        beginClockSyncIfNeeded(event.connectionId);
+        beginClockSyncIfNeeded(
+          musicState?.authorityConnectionId ?? event.connectionId,
+        );
         await sendStatus();
       }
       break;
     case "PLAY":
       if (await isGmConnection(event.connectionId)) {
+        await musicHydrationPromise;
+        const accepted = await acceptMusicState(
+          message.musicState,
+          event.connectionId,
+        );
+        const alreadyCurrent =
+          musicState?.stateId === message.musicState.stateId;
+        if (!accepted && !alreadyCurrent) {
+          console.warn(
+            `[cinematic-sync] PLAY stale ignorado (${message.requestId}).`,
+          );
+          break;
+        }
+        if (
+          accepted &&
+          message.musicState.authorityConnectionId === identity.connectionId
+        ) {
+          void persistMusicState(message.musicState).catch((error: unknown) => {
+            console.error(
+              "[cinematic-sync] Falha ao persistir handoff musical.",
+              error,
+            );
+          });
+        }
         await openCinematic(message, event.connectionId);
       } else {
         console.warn(
           `[cinematic-sync] PLAY não autorizado ignorado (${event.connectionId}).`,
         );
       }
+      break;
+    case "MUSIC_CONTROL":
+      await handleMusicControl(message, event.connectionId);
+      break;
+    case "MUSIC_STATE":
+      await handleMusicStateMessage(message, event.connectionId);
+      break;
+    case "MUSIC_STATE_REQUEST":
+      await handleMusicStateRequest(message, event.connectionId);
       break;
     case "CLOCK_PING":
       await handleClockPing(message, event.connectionId);
@@ -391,10 +668,25 @@ async function handleProtocolEvent(event: {
   }
 }
 
+async function requestMusicState(): Promise<void> {
+  const message = protocolMessage<MusicStateRequestMessage>({
+    kind: "MUSIC_STATE_REQUEST",
+    requestId: crypto.randomUUID(),
+    issuedAt: Date.now(),
+  });
+  await OBR.broadcast.sendMessage(BROADCAST_CHANNEL, message, {
+    destination: "ALL",
+  });
+}
+
 async function runPreload(): Promise<void> {
   try {
+    const [media] = await Promise.all([
+      preloadCinematic(getCinematicRequestUrl()),
+      musicPlayer?.preload() ?? Promise.resolve(),
+    ]);
     diagnostics = mergeDiagnostics(diagnostics, {
-      media: await preloadCinematic(getCinematicRequestUrl()),
+      media,
     });
     moveTo("READY");
   } catch (error) {
@@ -417,6 +709,24 @@ async function initialize(): Promise<void> {
   ]);
   identity = { connectionId, name, role };
   partyPlayers = players.filter((player) => player.connectionId !== connectionId);
+  musicPlayer = new MusicPlayer({
+    gmNow: gmNowForMusic,
+    toLocalTime: localTimeForMusic,
+  });
+  musicHydrationPromise = (async () => {
+    try {
+      const metadata = await OBR.room.getMetadata();
+      const persistedMusicState = metadata[MUSIC_ROOM_METADATA_KEY];
+      if (isMusicState(persistedMusicState)) {
+        await acceptMusicState(persistedMusicState);
+      }
+    } catch (error) {
+      console.warn(
+        "[cinematic-sync] Estado musical persistido indisponível; usando Broadcast.",
+        error,
+      );
+    }
+  })();
 
   OBR.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
     void handleProtocolEvent(event).catch((error: unknown) => {
@@ -427,6 +737,17 @@ async function initialize(): Promise<void> {
     void refreshParty(updatedPlayers).catch((error: unknown) => {
       console.error("[cinematic-sync] Falha ao atualizar Party.", error);
     });
+    void requestMusicState().catch((error: unknown) => {
+      console.error("[cinematic-sync] Falha ao solicitar estado musical.", error);
+    });
+  });
+  OBR.room.onMetadataChange((metadata) => {
+    const candidate = metadata[MUSIC_ROOM_METADATA_KEY];
+    if (isMusicState(candidate)) {
+      void acceptMusicState(candidate).catch((error: unknown) => {
+        console.error("[cinematic-sync] Estado musical persistido inválido.", error);
+      });
+    }
   });
   OBR.player.onChange((player) => {
     identity = {
@@ -438,10 +759,26 @@ async function initialize(): Promise<void> {
       console.error("[cinematic-sync] Falha ao atualizar a Tool do GM.", error);
     });
     beginClockSyncIfNeeded();
+    if (player.role === "GM") {
+      void (async () => {
+        await musicHydrationPromise;
+        await ensureInitialGmMusicState();
+      })().catch((error: unknown) => {
+        console.error("[cinematic-sync] Falha ao iniciar estado musical.", error);
+      });
+    }
   });
 
   await syncGmTool(role);
   beginClockSyncIfNeeded();
+  await musicHydrationPromise;
+  await ensureInitialGmMusicState();
+  await requestMusicState();
+  window.setInterval(() => {
+    if (musicState) {
+      musicPlayer?.reconcile(musicState);
+    }
+  }, MUSIC_DRIFT_CHECK_INTERVAL_MS);
   await sendStatus();
   await runPreload();
 }

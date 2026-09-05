@@ -1,4 +1,10 @@
 import { PROTOCOL_VERSION } from "./config";
+import {
+  isMusicControlAction,
+  isMusicState,
+  type MusicControlAction,
+  type MusicState,
+} from "./music-state";
 import { isClientPhase, type ClientPhase } from "./state-machine";
 
 export interface MediaDiagnostics {
@@ -65,6 +71,28 @@ export interface PlayMessage extends ProtocolBase {
   requestId: string;
   issuedAt: number;
   startAtGm: number;
+  musicState: MusicState;
+}
+
+export interface MusicControlMessage extends ProtocolBase {
+  kind: "MUSIC_CONTROL";
+  requestId: string;
+  issuedAt: number;
+  action: MusicControlAction;
+}
+
+export interface MusicStateMessage extends ProtocolBase {
+  kind: "MUSIC_STATE";
+  requestId?: string;
+  targetConnectionId?: string;
+  issuedAt: number;
+  state: MusicState;
+}
+
+export interface MusicStateRequestMessage extends ProtocolBase {
+  kind: "MUSIC_STATE_REQUEST";
+  requestId: string;
+  issuedAt: number;
 }
 
 export interface ClockPingMessage extends ProtocolBase {
@@ -86,6 +114,9 @@ export type ProtocolMessage =
   | HelloMessage
   | ClientStatusMessage
   | PlayMessage
+  | MusicControlMessage
+  | MusicStateMessage
+  | MusicStateRequestMessage
   | ClockPingMessage
   | ClockPongMessage;
 
@@ -122,8 +153,29 @@ export function isProtocolMessage(value: unknown): value is ProtocolMessage {
         isNonEmptyString(value.requestId) &&
         isFiniteNumber(value.issuedAt) &&
         isFiniteNumber(value.startAtGm) &&
-        value.startAtGm >= value.issuedAt
+        value.startAtGm >= value.issuedAt &&
+        isMusicState(value.musicState) &&
+        value.musicState.mode === "CINEMATIC" &&
+        value.musicState.stateId === value.requestId &&
+        value.musicState.updatedAtGm === value.issuedAt &&
+        value.musicState.anchorAtGm === value.startAtGm
       );
+    case "MUSIC_CONTROL":
+      return (
+        isNonEmptyString(value.requestId) &&
+        isFiniteNumber(value.issuedAt) &&
+        isMusicControlAction(value.action)
+      );
+    case "MUSIC_STATE":
+      return (
+        isFiniteNumber(value.issuedAt) &&
+        isMusicState(value.state) &&
+        (value.requestId === undefined || isNonEmptyString(value.requestId)) &&
+        (value.targetConnectionId === undefined ||
+          isNonEmptyString(value.targetConnectionId))
+      );
+    case "MUSIC_STATE_REQUEST":
+      return isNonEmptyString(value.requestId) && isFiniteNumber(value.issuedAt);
     case "CLOCK_PING":
       return (
         isNonEmptyString(value.nonce) &&

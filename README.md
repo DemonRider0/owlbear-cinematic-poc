@@ -1,16 +1,20 @@
 # Cinemática Sincronizada
 
-Extensão para Owlbear Rodeo que reproduz uma cinemática com áudio de forma sincronizada para todos os participantes da sala.
+Extensão para Owlbear Rodeo que reproduz uma cinemática e músicas de forma sincronizada para todos os participantes da sala.
 
 ## Funcionalidades
 
 - reprodução sincronizada controlada pelo GM;
+- player musical independente com Play/Pause, seek e seleção entre duas faixas;
+- loop contínuo preparado individualmente para cada música;
+- troca de faixa com crossfade sincronizado;
 - carregamento antecipado e invisível do vídeo;
 - apresentação em tela cheia sobre a interface do Owlbear Rodeo;
 - suporte a navegadores modernos em desktop e dispositivos móveis;
 - áudio integrado ao vídeo;
 - transições visuais de entrada e saída;
-- fechamento automático ao final da reprodução.
+- fechamento automático ao final da reprodução;
+- continuidade automática da trilha quando o áudio musical da cinemática termina.
 
 ## Instalação
 
@@ -23,19 +27,19 @@ https://demonrider0.github.io/owlbear-cinematic-poc/manifest.pages.json
 ## Uso
 
 1. O GM abre a ferramenta **Cinemática**.
-2. Aguarda todos os clientes aparecerem como prontos.
-3. Clica em **REPRODUZIR**.
-4. A cinemática é apresentada para todos os participantes e fecha automaticamente ao terminar.
+2. Na seção **Música**, escolhe **O Porão** ou **O Ídolo** e usa Play/Pause ou a barra de progresso.
+3. Para a cinemática, aguarda todos os clientes aparecerem como prontos e clica em **REPRODUZIR**.
+4. A música manual é encerrada antes do vídeo. A trilha completa assume automaticamente quando a música embutida termina e continua após o fechamento da cinemática.
 
-A ferramenta administrativa é exibida somente para o GM. O carregamento antecipado não apresenta interface aos jogadores.
+A ferramenta administrativa é exibida somente para o GM. O áudio vive no serviço em segundo plano de cada cliente, portanto fechar o painel não interrompe a reprodução. Jogadores não recebem controles.
 
 ## Compatibilidade
 
-A extensão foi desenvolvida para o Owlbear Rodeo e navegadores modernos. Políticas de reprodução automática podem variar conforme o navegador e as configurações do dispositivo.
+A extensão foi desenvolvida para o Owlbear Rodeo e navegadores modernos. A permissão de autoplay do manifest é necessária para a reprodução sincronizada sem interação individual de cada participante. Políticas locais do navegador ainda podem variar conforme a configuração do dispositivo.
 
 ## Vídeo
 
-Esta versão possui uma única cinemática incorporada à extensão.
+Esta versão possui uma única cinemática e duas músicas incorporadas à extensão.
 
 ## Privacidade
 

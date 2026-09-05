@@ -4,6 +4,7 @@ const sdk = vi.hoisted(() => ({
   onReady: vi.fn(),
   sendMessage: vi.fn(),
   createTool: vi.fn(),
+  setMetadata: vi.fn(),
   readyCallback: undefined as (() => void) | undefined,
 }));
 
@@ -31,6 +32,11 @@ vi.mock("@owlbear-rodeo/sdk", () => ({
       onMessage: vi.fn(),
       sendMessage: sdk.sendMessage,
     },
+    room: {
+      getMetadata: vi.fn().mockResolvedValue({}),
+      setMetadata: sdk.setMetadata,
+      onMetadataChange: vi.fn(),
+    },
     tool: {
       create: sdk.createTool,
       remove: vi.fn(),
@@ -48,11 +54,21 @@ vi.mock("../src/media-cache", () => ({
   preloadCinematic: media.preloadCinematic,
 }));
 
+vi.mock("../src/music-player", () => ({
+  MusicPlayer: class {
+    preload = vi.fn();
+    applyState = vi.fn();
+    reconcile = vi.fn();
+  },
+}));
+
 async function startBackground(): Promise<void> {
   await import("../src/background");
   expect(sdk.onReady).toHaveBeenCalledOnce();
   sdk.readyCallback?.();
-  await vi.waitFor(() => expect(sdk.sendMessage).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() =>
+    expect(sdk.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(4),
+  );
 }
 
 function lastReportedPhase(): unknown {
@@ -66,9 +82,11 @@ describe("background startup", () => {
     sdk.readyCallback = undefined;
     sdk.sendMessage.mockResolvedValue(undefined);
     sdk.createTool.mockResolvedValue(undefined);
+    sdk.setMetadata.mockResolvedValue(undefined);
     vi.stubGlobal("window", {
       location: { href: "http://localhost:5173/background.html" },
       setTimeout,
+      setInterval,
     });
     vi.stubGlobal("navigator", { userAgent: "vitest" });
   });
