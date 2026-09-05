@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
+  CINEMATIC_OUTRO_MUSIC,
   CINEMATIC_MUSIC_SYNC,
+  MUSIC_LOOP_CROSSFADE_MS,
   MUSIC_TRACK_CROSSFADE_MS,
+  getMusicLoopCycleSeconds,
 } from "../src/config";
 import {
+  createAuthorityTakeoverMusicState,
   createCinematicMusicState,
   createInitialMusicState,
   createManualMusicState,
+  createPostCinematicMusicState,
   isMusicState,
   musicPositionAtGm,
+  nextMusicLoopSeamAtGm,
 } from "../src/music-state";
 
 describe("music state anchors", () => {
@@ -24,6 +30,23 @@ describe("music state anchors", () => {
     );
 
     expect(musicPositionAtGm(playing, 12_500)).toBeCloseTo(10, 6);
+  });
+
+  it("schedules the dual-voice seam on the explicit logical cycle", () => {
+    const cycleSeconds = getMusicLoopCycleSeconds("o-porao");
+    expect(cycleSeconds).toBeCloseTo(314.560479167, 9);
+    expect(MUSIC_LOOP_CROSSFADE_MS).toBe(300);
+    expect(
+      nextMusicLoopSeamAtGm(
+        "o-porao",
+        cycleSeconds - 1.25,
+        10_000,
+      ),
+    ).toBe(11_250);
+    expect(nextMusicLoopSeamAtGm("o-porao", 0, 10_000)).toBeCloseTo(
+      10_000 + cycleSeconds * 1_000,
+      6,
+    );
   });
 
   it("anchors pause and seek at their synchronized application time", () => {
@@ -103,14 +126,115 @@ describe("music state anchors", () => {
       CINEMATIC_MUSIC_SYNC.playerPositionAtVideoStartSeconds,
     );
     expect(state.cinematic?.audibleAtGm).toBe(
-      11_500 + CINEMATIC_MUSIC_SYNC.embeddedMusicEndsAtVideoSeconds * 1_000,
+      11_500 +
+        CINEMATIC_MUSIC_SYNC.externalOverlapStartsAtVideoSeconds * 1_000,
     );
     expect(
       musicPositionAtGm(
         state,
-        state.cinematic?.audibleAtGm ?? Number.NaN,
+        state.cinematic?.embeddedMusicEndsAtGm ?? Number.NaN,
       ),
     ).toBeCloseTo(CINEMATIC_MUSIC_SYNC.playerPositionAtHandoffSeconds, 6);
+    expect(state.cinematic?.outro).toEqual({
+      trackId: CINEMATIC_OUTRO_MUSIC.trackId,
+      positionSeconds: CINEMATIC_OUTRO_MUSIC.positionSeconds,
+      startAtGm:
+        11_500 + CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds * 1_000,
+      durationMs: CINEMATIC_OUTRO_MUSIC.durationMs,
+      fromPositionSeconds:
+        CINEMATIC_OUTRO_MUSIC.sourceTrackPositionAtStartSeconds,
+    });
+    expect(
+      CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds +
+        CINEMATIC_OUTRO_MUSIC.durationMs / 1_000,
+    ).toBeCloseTo(CINEMATIC_MUSIC_SYNC.videoDurationSeconds, 9);
     expect(isMusicState(state)).toBe(true);
+  });
+
+  it("materializes O Porão as a playing manual state at video end", () => {
+    const cinematic = createCinematicMusicState(
+      "gm-1",
+      "cinematic-1",
+      7,
+      10_000,
+      11_500,
+    );
+    const completed = createPostCinematicMusicState(
+      cinematic,
+      "gm-1",
+      "manual-1",
+      cinematic.cinematic?.videoEndsAtGm ?? Number.NaN,
+    );
+
+    expect(completed.mode).toBe("MANUAL");
+    expect(completed.trackId).toBe("o-porao");
+    expect(completed.playing).toBe(true);
+    expect(completed.anchorAtGm).toBe(cinematic.cinematic?.videoEndsAtGm);
+    expect(completed.positionSeconds).toBeCloseTo(34.95, 6);
+    expect(musicPositionAtGm(completed, completed.anchorAtGm + 5_000)).toBeCloseTo(
+      39.95,
+      6,
+    );
+    expect(isMusicState(completed)).toBe(true);
+  });
+
+  it("preserves and reanchors the cinematic agenda on authority takeover", () => {
+    const cinematic = createCinematicMusicState(
+      "gm-old",
+      "cinematic-1",
+      7,
+      10_000,
+      11_500,
+    );
+    const previousNow = 21_500;
+    const newNow = 19_250;
+    const takeover = createAuthorityTakeoverMusicState(
+      cinematic,
+      "gm-new",
+      "takeover-1",
+      previousNow,
+      newNow,
+    );
+
+    expect(takeover.mode).toBe("CINEMATIC");
+    expect(takeover.authorityConnectionId).toBe("gm-new");
+    expect(takeover.anchorAtGm).toBe(cinematic.anchorAtGm - 2_250);
+    expect(takeover.cinematic?.videoStartAtGm).toBe(9_250);
+    expect(takeover.cinematic?.audibleAtGm).toBe(
+      (cinematic.cinematic?.audibleAtGm ?? Number.NaN) - 2_250,
+    );
+    expect(takeover.cinematic?.outro?.startAtGm).toBe(
+      (cinematic.cinematic?.outro?.startAtGm ?? Number.NaN) - 2_250,
+    );
+    expect(takeover.cinematic?.videoEndsAtGm).toBe(
+      (cinematic.cinematic?.videoEndsAtGm ?? Number.NaN) - 2_250,
+    );
+    expect(isMusicState(takeover)).toBe(true);
+  });
+
+  it("materializes the advanced O Porão position on a late takeover", () => {
+    const cinematic = createCinematicMusicState(
+      "gm-old",
+      "cinematic-1",
+      7,
+      10_000,
+      11_500,
+    );
+    const videoEndsAtGm = cinematic.cinematic?.videoEndsAtGm ?? Number.NaN;
+    const takeover = createAuthorityTakeoverMusicState(
+      cinematic,
+      "gm-new",
+      "takeover-1",
+      videoEndsAtGm + 5_000,
+      90_000,
+    );
+
+    expect(takeover.mode).toBe("MANUAL");
+    expect(takeover.trackId).toBe("o-porao");
+    expect(takeover.playing).toBe(true);
+    expect(takeover.positionSeconds).toBeCloseTo(39.95, 6);
+    expect(takeover.anchorAtGm).toBe(90_000);
+    expect(takeover.cinematic).toBeUndefined();
+    expect(isMusicState(takeover)).toBe(true);
   });
 });

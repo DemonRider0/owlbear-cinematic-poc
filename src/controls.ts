@@ -7,6 +7,7 @@ import {
   MUSIC_TRACKS,
   PLAY_START_DELAY_MS,
   STATUS_REFRESH_INTERVAL_MS,
+  getMusicLoopCycleSeconds,
   getMusicTrackConfig,
 } from "./config";
 import {
@@ -215,12 +216,12 @@ function renderMusic(): void {
     "aria-label",
     state.playing ? "Pausar música" : "Reproduzir música",
   );
-  musicProgress.max = String(track.durationSeconds);
+  musicProgress.max = String(getMusicLoopCycleSeconds(track.id));
   if (!seekingMusic) {
     musicProgress.value = String(position);
     musicCurrentTime.textContent = formatTime(position);
   }
-  musicDuration.textContent = formatTime(track.durationSeconds);
+  musicDuration.textContent = formatTime(getMusicLoopCycleSeconds(track.id));
   musicStatus.textContent = !clientsReadyForMusic
     ? "Aguardando áudio e relógios dos clientes…"
     : sendingMusicCommand

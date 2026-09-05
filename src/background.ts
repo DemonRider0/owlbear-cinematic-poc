@@ -18,11 +18,12 @@ import { preloadCinematic } from "./media-cache";
 import { MusicPlayer } from "./music-player";
 import {
   compareMusicStates,
+  createAuthorityTakeoverMusicState,
   createInitialMusicState,
   createManualMusicState,
+  createPostCinematicMusicState,
   isCinematicMusicLocked,
   isMusicState,
-  musicPositionAtGm,
   type MusicState,
 } from "./music-state";
 import {
@@ -65,6 +66,8 @@ let validClockSamples = 0;
 let musicPlayer: MusicPlayer | undefined;
 let musicState: MusicState | undefined;
 let musicHydrationPromise: Promise<void> | undefined;
+let cinematicCompletionTimer: number | undefined;
+let finalizingCinematicStateId: string | undefined;
 const pendingClockPings = new Map<string, number>();
 
 function mergeDiagnostics(
@@ -361,6 +364,7 @@ async function acceptMusicState(
   musicState = candidate;
   beginClockSyncIfNeeded(candidate.authorityConnectionId);
   applyMusicStateIfClockReady();
+  scheduleCinematicMusicCompletion(candidate);
   return true;
 }
 
@@ -410,10 +414,72 @@ async function publishMusicState(
   }
 }
 
+function scheduleCinematicMusicCompletion(state: MusicState): void {
+  if (cinematicCompletionTimer !== undefined) {
+    window.clearTimeout(cinematicCompletionTimer);
+    cinematicCompletionTimer = undefined;
+  }
+  if (
+    identity.role !== "GM" ||
+    state.authorityConnectionId !== identity.connectionId ||
+    state.mode !== "CINEMATIC" ||
+    !state.cinematic?.outro
+  ) {
+    return;
+  }
+
+  const expectedStateId = state.stateId;
+  const delay = Math.max(0, state.cinematic.videoEndsAtGm - Date.now());
+  cinematicCompletionTimer = window.setTimeout(() => {
+    cinematicCompletionTimer = undefined;
+    void finalizeExpiredCinematicMusicState(expectedStateId).catch(
+      (error: unknown) => {
+        console.error(
+          "[cinematic-sync] Falha ao concluir estado musical da cinemática.",
+          error,
+        );
+      },
+    );
+  }, delay);
+}
+
+async function finalizeExpiredCinematicMusicState(
+  expectedStateId?: string,
+): Promise<boolean> {
+  const current = musicState;
+  if (
+    !current ||
+    current.mode !== "CINEMATIC" ||
+    !current.cinematic?.outro ||
+    current.authorityConnectionId !== identity.connectionId ||
+    identity.role !== "GM" ||
+    (expectedStateId !== undefined && current.stateId !== expectedStateId) ||
+    Date.now() < current.cinematic.videoEndsAtGm ||
+    finalizingCinematicStateId === current.stateId
+  ) {
+    return false;
+  }
+
+  finalizingCinematicStateId = current.stateId;
+  try {
+    const completed = createPostCinematicMusicState(
+      current,
+      identity.connectionId,
+      crypto.randomUUID(),
+      Date.now(),
+    );
+    await publishMusicState(completed);
+    return musicState?.stateId === completed.stateId;
+  } finally {
+    finalizingCinematicStateId = undefined;
+  }
+}
+
 async function ensureInitialGmMusicState(): Promise<void> {
   if (identity.role !== "GM") {
     return;
   }
+  await finalizeExpiredCinematicMusicState();
   if (musicState) {
     if (
       musicState.authorityConnectionId === identity.connectionId ||
@@ -422,20 +488,15 @@ async function ensureInitialGmMusicState(): Promise<void> {
       return;
     }
 
+    const previousAuthorityNowGm = gmNowForMusic();
     const nowGm = Date.now();
-    const projectedPosition = musicPositionAtGm(musicState, gmNowForMusic());
-    const takeover: MusicState = {
-      schemaVersion: musicState.schemaVersion,
-      stateId: crypto.randomUUID(),
-      revision: musicState.revision + 1,
-      authorityConnectionId: identity.connectionId,
-      updatedAtGm: Math.max(nowGm, musicState.updatedAtGm + 1),
-      mode: "MANUAL",
-      trackId: musicState.trackId,
-      playing: musicState.playing,
-      positionSeconds: projectedPosition,
-      anchorAtGm: nowGm,
-    };
+    const takeover = createAuthorityTakeoverMusicState(
+      musicState,
+      identity.connectionId,
+      crypto.randomUUID(),
+      previousAuthorityNowGm,
+      nowGm,
+    );
     await publishMusicState(takeover);
     return;
   }
@@ -466,6 +527,10 @@ async function handleMusicControl(
   }
 
   await ensureInitialGmMusicState();
+  if (!musicState) {
+    return;
+  }
+  await finalizeExpiredCinematicMusicState();
   if (!musicState) {
     return;
   }

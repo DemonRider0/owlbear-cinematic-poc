@@ -1,7 +1,9 @@
 import {
+  CINEMATIC_OUTRO_MUSIC,
   CINEMATIC_MUSIC_SYNC,
   DEFAULT_MUSIC_TRACK_ID,
   MUSIC_TRACK_CROSSFADE_MS,
+  getMusicLoopCycleSeconds,
   getMusicTrackConfig,
   type MusicTrackId,
 } from "./config";
@@ -21,8 +23,21 @@ export interface MusicTransition {
 export interface CinematicMusicHandoff {
   videoStartAtGm: number;
   audibleAtGm: number;
+  dominantAtGm?: number;
+  embeddedMusicEndsAtGm?: number;
+  normalizedAtGm?: number;
   videoEndsAtGm: number;
   fadeInMs: number;
+  embeddedTrackGain?: number;
+  outro?: CinematicMusicOutro;
+}
+
+export interface CinematicMusicOutro {
+  trackId: MusicTrackId;
+  positionSeconds: number;
+  startAtGm: number;
+  durationMs: number;
+  fromPositionSeconds: number;
 }
 
 export interface MusicState {
@@ -66,9 +81,30 @@ export function normalizeMusicPosition(
   trackId: MusicTrackId,
   positionSeconds: number,
 ): number {
+  const cycleSeconds = getMusicLoopCycleSeconds(trackId);
+  const remainder = positionSeconds % cycleSeconds;
+  return remainder < 0 ? remainder + cycleSeconds : remainder;
+}
+
+export function normalizeMusicMediaPosition(
+  trackId: MusicTrackId,
+  positionSeconds: number,
+): number {
   const duration = getMusicTrackConfig(trackId).durationSeconds;
   const remainder = positionSeconds % duration;
   return remainder < 0 ? remainder + duration : remainder;
+}
+
+export function nextMusicLoopSeamAtGm(
+  trackId: MusicTrackId,
+  positionSeconds: number,
+  positionAtGm: number,
+): number {
+  const cycleSeconds = getMusicLoopCycleSeconds(trackId);
+  const normalized = normalizeMusicPosition(trackId, positionSeconds);
+  const secondsUntilSeam =
+    normalized === 0 ? cycleSeconds : cycleSeconds - normalized;
+  return positionAtGm + secondsUntilSeam * 1_000;
 }
 
 export function musicPositionAtGm(
@@ -78,10 +114,10 @@ export function musicPositionAtGm(
   const elapsedSeconds = state.playing
     ? Math.max(0, gmTime - state.anchorAtGm) / 1_000
     : 0;
-  return normalizeMusicPosition(
-    state.trackId,
-    state.positionSeconds + elapsedSeconds,
-  );
+  const position = state.positionSeconds + elapsedSeconds;
+  return state.mode === "CINEMATIC"
+    ? normalizeMusicMediaPosition(state.trackId, position)
+    : normalizeMusicPosition(state.trackId, position);
 }
 
 export function isCinematicMusicLocked(
@@ -200,11 +236,143 @@ export function createCinematicMusicState(
       videoStartAtGm,
       audibleAtGm:
         videoStartAtGm +
+        CINEMATIC_MUSIC_SYNC.externalOverlapStartsAtVideoSeconds * 1_000,
+      dominantAtGm:
+        videoStartAtGm +
+        CINEMATIC_MUSIC_SYNC.externalDominantAtVideoSeconds * 1_000,
+      embeddedMusicEndsAtGm:
+        videoStartAtGm +
         CINEMATIC_MUSIC_SYNC.embeddedMusicEndsAtVideoSeconds * 1_000,
+      normalizedAtGm:
+        videoStartAtGm +
+        CINEMATIC_MUSIC_SYNC.gainNormalizationEndsAtVideoSeconds * 1_000,
       videoEndsAtGm:
         videoStartAtGm + CINEMATIC_MUSIC_SYNC.videoDurationSeconds * 1_000,
       fadeInMs: CINEMATIC_MUSIC_SYNC.fadeInMs,
+      embeddedTrackGain: CINEMATIC_MUSIC_SYNC.embeddedTrackGain,
+      outro: {
+        trackId: CINEMATIC_OUTRO_MUSIC.trackId,
+        positionSeconds: CINEMATIC_OUTRO_MUSIC.positionSeconds,
+        startAtGm:
+          videoStartAtGm +
+          CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds * 1_000,
+        durationMs: CINEMATIC_OUTRO_MUSIC.durationMs,
+        fromPositionSeconds:
+          CINEMATIC_OUTRO_MUSIC.sourceTrackPositionAtStartSeconds,
+      },
     },
+  };
+}
+
+export function createPostCinematicMusicState(
+  current: MusicState,
+  authorityConnectionId: string,
+  stateId: string,
+  issuedAtGm: number,
+): MusicState {
+  const handoff = current.cinematic;
+  const outro = handoff?.outro;
+  if (current.mode !== "CINEMATIC" || !handoff || !outro) {
+    throw new Error("Estado cinematic sem transição musical final.");
+  }
+
+  return {
+    schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
+    stateId,
+    revision: current.revision + 1,
+    authorityConnectionId,
+    updatedAtGm: Math.max(issuedAtGm, current.updatedAtGm + 1),
+    mode: "MANUAL",
+    trackId: outro.trackId,
+    playing: true,
+    positionSeconds: normalizeMusicPosition(
+      outro.trackId,
+      outro.positionSeconds +
+        (handoff.videoEndsAtGm - outro.startAtGm) / 1_000,
+    ),
+    anchorAtGm: handoff.videoEndsAtGm,
+  };
+}
+
+export function createAuthorityTakeoverMusicState(
+  current: MusicState,
+  authorityConnectionId: string,
+  stateId: string,
+  previousAuthorityNowGm: number,
+  newAuthorityNowGm: number,
+): MusicState {
+  const nextRevision = current.revision + 1;
+  const updatedAtGm = Math.max(
+    newAuthorityNowGm,
+    current.updatedAtGm + 1,
+  );
+  const handoff = current.cinematic;
+  const outro = handoff?.outro;
+
+  if (
+    current.mode === "CINEMATIC" &&
+    handoff &&
+    outro &&
+    previousAuthorityNowGm >= handoff.videoEndsAtGm
+  ) {
+    return {
+      schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
+      stateId,
+      revision: nextRevision,
+      authorityConnectionId,
+      updatedAtGm,
+      mode: "MANUAL",
+      trackId: outro.trackId,
+      playing: true,
+      positionSeconds: normalizeMusicPosition(
+        outro.trackId,
+        outro.positionSeconds +
+          Math.max(0, previousAuthorityNowGm - outro.startAtGm) / 1_000,
+      ),
+      anchorAtGm: newAuthorityNowGm,
+    };
+  }
+
+  const clockDeltaMs = newAuthorityNowGm - previousAuthorityNowGm;
+  return {
+    ...current,
+    stateId,
+    revision: nextRevision,
+    authorityConnectionId,
+    updatedAtGm,
+    anchorAtGm: current.anchorAtGm + clockDeltaMs,
+    transition: current.transition
+      ? {
+          ...current.transition,
+          startAtGm: current.transition.startAtGm + clockDeltaMs,
+        }
+      : undefined,
+    cinematic: handoff
+      ? {
+          ...handoff,
+          videoStartAtGm: handoff.videoStartAtGm + clockDeltaMs,
+          audibleAtGm: handoff.audibleAtGm + clockDeltaMs,
+          dominantAtGm:
+            handoff.dominantAtGm === undefined
+              ? undefined
+              : handoff.dominantAtGm + clockDeltaMs,
+          embeddedMusicEndsAtGm:
+            handoff.embeddedMusicEndsAtGm === undefined
+              ? undefined
+              : handoff.embeddedMusicEndsAtGm + clockDeltaMs,
+          normalizedAtGm:
+            handoff.normalizedAtGm === undefined
+              ? undefined
+              : handoff.normalizedAtGm + clockDeltaMs,
+          videoEndsAtGm: handoff.videoEndsAtGm + clockDeltaMs,
+          outro: outro
+            ? {
+                ...outro,
+                startAtGm: outro.startAtGm + clockDeltaMs,
+              }
+            : undefined,
+        }
+      : undefined,
   };
 }
 
@@ -239,15 +407,80 @@ function isMusicTransition(value: unknown): value is MusicTransition {
 }
 
 function isCinematicMusicHandoff(value: unknown): value is CinematicMusicHandoff {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const videoStartAtGm = value.videoStartAtGm;
+  const audibleAtGm = value.audibleAtGm;
+  const videoEndsAtGm = value.videoEndsAtGm;
+  const fadeInMs = value.fadeInMs;
+  if (
+    !isFiniteNumber(videoStartAtGm) ||
+    !isFiniteNumber(audibleAtGm) ||
+    audibleAtGm < videoStartAtGm ||
+    !isFiniteNumber(videoEndsAtGm) ||
+    videoEndsAtGm < audibleAtGm ||
+    !isFiniteNumber(fadeInMs) ||
+    fadeInMs <= 0
+  ) {
+    return false;
+  }
+
+  const dominantAtGm = value.dominantAtGm;
+  const embeddedMusicEndsAtGm = value.embeddedMusicEndsAtGm;
+  const normalizedAtGm = value.normalizedAtGm;
+  const embeddedTrackGain = value.embeddedTrackGain;
+  if (
+    (dominantAtGm !== undefined && !isFiniteNumber(dominantAtGm)) ||
+    (embeddedMusicEndsAtGm !== undefined &&
+      !isFiniteNumber(embeddedMusicEndsAtGm)) ||
+    (normalizedAtGm !== undefined && !isFiniteNumber(normalizedAtGm)) ||
+    (embeddedTrackGain !== undefined &&
+      (!isFiniteNumber(embeddedTrackGain) ||
+        embeddedTrackGain <= 0 ||
+        embeddedTrackGain > 1))
+  ) {
+    return false;
+  }
+  if (
+    (dominantAtGm !== undefined &&
+      (dominantAtGm < audibleAtGm || dominantAtGm > videoEndsAtGm)) ||
+    (embeddedMusicEndsAtGm !== undefined &&
+      (embeddedMusicEndsAtGm < audibleAtGm ||
+        embeddedMusicEndsAtGm > videoEndsAtGm)) ||
+    (normalizedAtGm !== undefined &&
+      (normalizedAtGm < (embeddedMusicEndsAtGm ?? audibleAtGm) ||
+        normalizedAtGm > videoEndsAtGm))
+  ) {
+    return false;
+  }
+  const outro = value.outro;
+  if (outro !== undefined) {
+    if (!isCinematicMusicOutro(outro)) {
+      return false;
+    }
+    if (
+      outro.startAtGm < videoStartAtGm ||
+      outro.startAtGm + outro.durationMs > videoEndsAtGm + 1
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isCinematicMusicOutro(value: unknown): value is CinematicMusicOutro {
   return (
     isRecord(value) &&
-    isFiniteNumber(value.videoStartAtGm) &&
-    isFiniteNumber(value.audibleAtGm) &&
-    value.audibleAtGm >= value.videoStartAtGm &&
-    isFiniteNumber(value.videoEndsAtGm) &&
-    value.videoEndsAtGm >= value.audibleAtGm &&
-    isFiniteNumber(value.fadeInMs) &&
-    value.fadeInMs > 0
+    isMusicTrackId(value.trackId) &&
+    isFiniteNumber(value.positionSeconds) &&
+    value.positionSeconds >= 0 &&
+    isFiniteNumber(value.startAtGm) &&
+    isFiniteNumber(value.durationMs) &&
+    value.durationMs > 0 &&
+    isFiniteNumber(value.fromPositionSeconds) &&
+    value.fromPositionSeconds >= 0
   );
 }
 

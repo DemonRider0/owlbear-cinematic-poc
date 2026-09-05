@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MusicPlayer } from "../src/music-player";
 import {
+  CINEMATIC_MUSIC_SYNC,
+  MUSIC_GAIN_STEP_MS,
+  MUSIC_LOOP_CROSSFADE_MS,
+  MUSIC_TRACK_CROSSFADE_MS,
+  getMusicLoopCycleSeconds,
+} from "../src/config";
+import {
   createCinematicMusicState,
   createInitialMusicState,
   createManualMusicState,
@@ -15,6 +22,7 @@ class FakeAudio extends EventTarget {
   loop = false;
   paused = true;
   preload = "";
+  readyState = 4;
   src = "";
   volume = 1;
   private resolveDeferredPlay: (() => void) | undefined;
@@ -81,6 +89,8 @@ describe("persistent music player", () => {
 
   it("keeps the previous track alive through a synchronized crossfade", async () => {
     const player = createPlayer();
+    expect(FakeAudio.instances).toHaveLength(4);
+    expect(FakeAudio.instances.every((audio) => audio.loop === false)).toBe(true);
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
     const playing = createManualMusicState(
       initial,
@@ -94,7 +104,7 @@ describe("persistent music player", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     const oldTrack = audioAt(0);
-    const newTrack = audioAt(1);
+    const newTrack = audioAt(2);
     expect(oldTrack.paused).toBe(false);
     expect(oldTrack.volume).toBe(1);
 
@@ -114,13 +124,15 @@ describe("persistent music player", () => {
     expect(oldTrack.volume).toBeCloseTo(1, 6);
     expect(newTrack.volume).toBeCloseTo(0, 6);
 
-    await vi.advanceTimersByTimeAsync(900);
+    await vi.advanceTimersByTimeAsync(MUSIC_TRACK_CROSSFADE_MS / 2);
     expect(oldTrack.volume).toBeGreaterThan(0.65);
     expect(oldTrack.volume).toBeLessThan(0.75);
     expect(newTrack.volume).toBeGreaterThan(0.65);
     expect(newTrack.volume).toBeLessThan(0.75);
 
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(
+      MUSIC_TRACK_CROSSFADE_MS / 2 + 100,
+    );
     expect(oldTrack.paused).toBe(true);
     expect(oldTrack.volume).toBe(0);
     expect(newTrack.paused).toBe(false);
@@ -196,7 +208,7 @@ describe("persistent music player", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     const oldTrack = audioAt(0);
-    const newTrack = audioAt(1);
+    const newTrack = audioAt(2);
     newTrack.deferPlay = true;
     const changed = createManualMusicState(
       playing,
@@ -207,7 +219,9 @@ describe("persistent music player", () => {
       1_500,
     );
     player.applyState(changed);
-    await vi.advanceTimersByTimeAsync(2_500);
+    await vi.advanceTimersByTimeAsync(
+      500 + MUSIC_TRACK_CROSSFADE_MS + 100,
+    );
 
     expect(oldTrack.paused).toBe(false);
     expect(oldTrack.volume).toBe(1);
@@ -236,7 +250,7 @@ describe("persistent music player", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     const manualTrack = audioAt(0);
-    const cinematicTrack = audioAt(1);
+    const cinematicTrack = audioAt(2);
     const cinematic = createCinematicMusicState(
       "gm-1",
       "cinematic",
@@ -255,13 +269,304 @@ describe("persistent music player", () => {
     expect(cinematicTrack.volume).toBe(0);
     expect(cinematicTrack.currentTime).toBeCloseTo(308.847, 3);
 
-    await vi.advanceTimersByTimeAsync(33_800);
-    expect(cinematicTrack.volume).toBe(0);
-    await vi.advanceTimersByTimeAsync(400);
-    expect(cinematicTrack.volume).toBeGreaterThan(0.65);
-    expect(cinematicTrack.volume).toBeLessThan(0.75);
-    await vi.advanceTimersByTimeAsync(500);
-    expect(cinematicTrack.paused).toBe(false);
-    expect(cinematicTrack.volume).toBe(1);
+    await vi.advanceTimersByTimeAsync(
+      CINEMATIC_MUSIC_SYNC.externalOverlapStartsAtVideoSeconds * 1_000,
+    );
+    const wrappedCinematicTrack = audioAt(3);
+    expect(cinematicTrack.paused).toBe(true);
+    expect(wrappedCinematicTrack.volume).toBe(0);
+    await vi.advanceTimersByTimeAsync(
+      CINEMATIC_MUSIC_SYNC.fadeInMs / 2,
+    );
+    expect(wrappedCinematicTrack.volume).toBeGreaterThan(0.31);
+    expect(wrappedCinematicTrack.volume).toBeLessThan(0.35);
+    await vi.advanceTimersByTimeAsync(
+      CINEMATIC_MUSIC_SYNC.fadeInMs / 2 + 1_300,
+    );
+    expect(wrappedCinematicTrack.paused).toBe(false);
+    expect(wrappedCinematicTrack.volume).toBeGreaterThan(0.95);
+  });
+
+  it("alternates two compressed voices across two scheduled seams", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const cycleSeconds = getMusicLoopCycleSeconds("o-porao");
+    const seeked = createManualMusicState(
+      initial,
+      { type: "SEEK", positionSeconds: cycleSeconds - 1 },
+      "gm-1",
+      "seeked",
+      1_000,
+      1_000,
+    );
+    const playing = createManualMusicState(
+      seeked,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_000,
+    );
+    player.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const voiceA = audioAt(0);
+    const voiceB = audioAt(1);
+    expect(voiceA.paused).toBe(false);
+    expect(voiceB.paused).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(voiceA.paused).toBe(false);
+    expect(voiceB.paused).toBe(false);
+    expect(voiceA.volume).toBeCloseTo(1, 6);
+    expect(voiceB.volume).toBeCloseTo(0, 6);
+
+    await vi.advanceTimersByTimeAsync(160);
+    expect(voiceA.volume).toBeGreaterThan(0.65);
+    expect(voiceA.volume).toBeLessThan(0.75);
+    expect(voiceB.volume).toBeGreaterThan(0.65);
+    expect(voiceB.volume).toBeLessThan(0.75);
+
+    await vi.advanceTimersByTimeAsync(
+      MUSIC_LOOP_CROSSFADE_MS - 160 + MUSIC_GAIN_STEP_MS,
+    );
+    expect(voiceA.paused).toBe(true);
+    expect(voiceB.paused).toBe(false);
+    expect(voiceB.volume).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(
+      cycleSeconds * 1_000 - MUSIC_LOOP_CROSSFADE_MS,
+    );
+    expect(voiceA.paused).toBe(false);
+    expect(voiceB.paused).toBe(false);
+    await vi.advanceTimersByTimeAsync(MUSIC_LOOP_CROSSFADE_MS);
+    expect(voiceA.paused).toBe(false);
+    expect(voiceA.volume).toBe(1);
+    expect(voiceB.paused).toBe(true);
+  });
+
+  it("reconstructs both voices when playback starts inside a loop seam", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const seeked = createManualMusicState(
+      initial,
+      { type: "SEEK", positionSeconds: 0.15 },
+      "gm-1",
+      "seeked",
+      1_000,
+      1_000,
+    );
+    const playing = createManualMusicState(
+      seeked,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_000,
+    );
+    player.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const outgoing = audioAt(0);
+    const incoming = audioAt(1);
+    expect(outgoing.paused).toBe(false);
+    expect(incoming.paused).toBe(false);
+    expect(outgoing.currentTime).toBeCloseTo(
+      getMusicLoopCycleSeconds("o-porao") + 0.15,
+      6,
+    );
+    expect(incoming.currentTime).toBeCloseTo(0.15, 6);
+    expect(outgoing.volume).toBeCloseTo(Math.SQRT1_2, 2);
+    expect(incoming.volume).toBeCloseTo(Math.SQRT1_2, 2);
+
+    await vi.advanceTimersByTimeAsync(160);
+    expect(outgoing.paused).toBe(true);
+    expect(incoming.paused).toBe(false);
+    expect(incoming.volume).toBe(1);
+  });
+
+  it("does not mistake a delayed first start for a completed loop", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 0);
+    const playing = createManualMusicState(
+      initial,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      0,
+      900,
+    );
+    player.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const firstVoice = audioAt(0);
+    const standbyVoice = audioAt(1);
+    expect(firstVoice.paused).toBe(false);
+    expect(firstVoice.currentTime).toBeCloseTo(0.1, 6);
+    expect(firstVoice.volume).toBe(1);
+    expect(standbyVoice.paused).toBe(true);
+    expect(standbyVoice.volume).toBe(0);
+  });
+
+  it("keeps the old loop scheduler alive until an anchored pause applies", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const cycleSeconds = getMusicLoopCycleSeconds("o-porao");
+    const seeked = createManualMusicState(
+      initial,
+      { type: "SEEK", positionSeconds: cycleSeconds - 0.2 },
+      "gm-1",
+      "seeked",
+      1_000,
+      1_000,
+    );
+    const playing = createManualMusicState(
+      seeked,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_000,
+    );
+    player.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const paused = createManualMusicState(
+      playing,
+      { type: "PAUSE" },
+      "gm-1",
+      "paused",
+      1_000,
+      1_500,
+    );
+    player.applyState(paused);
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(audioAt(0).paused).toBe(false);
+    expect(audioAt(1).paused).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(300);
+    expect(audioAt(0).paused).toBe(true);
+    expect(audioAt(1).paused).toBe(true);
+    expect(audioAt(1).currentTime).toBeCloseTo(0.3, 6);
+  });
+
+  it("ignores a stale play promise after pause", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const voice = audioAt(0);
+    voice.deferPlay = true;
+    const playing = createManualMusicState(
+      initial,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_000,
+    );
+    player.applyState(playing);
+
+    const paused = createManualMusicState(
+      playing,
+      { type: "PAUSE" },
+      "gm-1",
+      "paused",
+      1_000,
+      1_000,
+    );
+    player.applyState(paused);
+    voice.finishDeferredPlay();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(voice.paused).toBe(true);
+    expect(voice.volume).toBe(0);
+  });
+
+  it("composes a track crossfade with an outgoing loop seam", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const cycleSeconds = getMusicLoopCycleSeconds("o-porao");
+    const seeked = createManualMusicState(
+      initial,
+      { type: "SEEK", positionSeconds: cycleSeconds - 1 },
+      "gm-1",
+      "seeked",
+      1_000,
+      1_000,
+    );
+    const playing = createManualMusicState(
+      seeked,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_000,
+    );
+    player.applyState(playing);
+    const changed = createManualMusicState(
+      playing,
+      { type: "SELECT_TRACK", trackId: "o-idolo" },
+      "gm-1",
+      "changed",
+      1_000,
+      1_500,
+    );
+    player.applyState(changed);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(audioAt(0).paused).toBe(false);
+    expect(audioAt(1).paused).toBe(false);
+    expect(audioAt(2).paused).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(160);
+    expect(audioAt(0).volume).toBeGreaterThan(0);
+    expect(audioAt(0).volume).toBeLessThan(1);
+    expect(audioAt(1).volume).toBeGreaterThan(0);
+    expect(audioAt(1).volume).toBeLessThan(1);
+    expect(audioAt(2).volume).toBeGreaterThan(0);
+    expect(audioAt(2).volume).toBeLessThan(1);
+
+    await vi.advanceTimersByTimeAsync(MUSIC_TRACK_CROSSFADE_MS);
+    expect(audioAt(0).paused).toBe(true);
+    expect(audioAt(1).paused).toBe(true);
+    expect(audioAt(2).paused).toBe(false);
+    expect(audioAt(2).volume).toBe(1);
+  });
+
+  it("crossfades to O Porão before the cinematic ends", async () => {
+    const player = createPlayer();
+    const cinematic = createCinematicMusicState(
+      "gm-1",
+      "cinematic",
+      1,
+      1_000,
+      2_500,
+    );
+    player.applyState(cinematic);
+    await vi.advanceTimersByTimeAsync(
+      1_500 +
+        (cinematic.cinematic?.outro?.startAtGm ?? 0) -
+        (cinematic.cinematic?.videoStartAtGm ?? 0),
+    );
+
+    const idolo = audioAt(3);
+    const porao = audioAt(0);
+    expect(idolo.paused).toBe(false);
+    expect(porao.paused).toBe(false);
+    expect(idolo.volume).toBeCloseTo(1, 6);
+    expect(porao.volume).toBeCloseTo(0, 6);
+    expect(porao.currentTime).toBeCloseTo(30.95, 3);
+
+    await vi.advanceTimersByTimeAsync(MUSIC_TRACK_CROSSFADE_MS / 2 + 100);
+    expect(idolo.volume).toBeGreaterThan(0.65);
+    expect(idolo.volume).toBeLessThan(0.75);
+    expect(porao.volume).toBeGreaterThan(0.65);
+    expect(porao.volume).toBeLessThan(0.75);
+
+    await vi.advanceTimersByTimeAsync(MUSIC_TRACK_CROSSFADE_MS / 2);
+    expect(idolo.paused).toBe(true);
+    expect(porao.paused).toBe(false);
+    expect(porao.volume).toBe(1);
   });
 });
