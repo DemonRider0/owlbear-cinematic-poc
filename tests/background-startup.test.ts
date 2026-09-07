@@ -106,7 +106,7 @@ describe("background startup", () => {
 
     expect(sdk.createTool).toHaveBeenCalledOnce();
     expect(media.preloadCinematic).toHaveBeenCalledWith(
-      "http://localhost:5173/assets/cinematic.mp4?cinematic-cache=v1",
+      "http://localhost:5173/assets/cinematic.mp4?cinematic-cache=v2",
     );
     expect(lastReportedPhase()).toBe("READY");
   });

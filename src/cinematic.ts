@@ -8,7 +8,6 @@ import {
   MODAL_CLOSE_RETRY_MS,
   MODAL_PREPARE_TIMEOUT_MS,
   PLAYBACK_WATCHDOG_GRACE_MS,
-  cinematicAudioGainForRemainingMs,
 } from "./config";
 import { toSerializableError } from "./errors";
 import { getCachedCinematic } from "./media-cache";
@@ -42,7 +41,6 @@ let diagnostics: ClientDiagnostics = {
 let objectUrl: string | undefined;
 let finishing = false;
 let watchdog: ReturnType<typeof setTimeout> | undefined;
-let audioFadeAnimation: number | undefined;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -78,36 +76,8 @@ function clearWatchdog(): void {
   }
 }
 
-function clearTerminalAudioFade(): void {
-  if (audioFadeAnimation !== undefined) {
-    cancelAnimationFrame(audioFadeAnimation);
-    audioFadeAnimation = undefined;
-  }
-}
-
-function updateTerminalAudioFade(): void {
-  audioFadeAnimation = undefined;
-  if (finishing || video.paused || video.ended) {
-    return;
-  }
-
-  if (Number.isFinite(video.duration) && video.duration > 0) {
-    const remainingMs = Math.max(0, (video.duration - video.currentTime) * 1_000);
-    video.volume = cinematicAudioGainForRemainingMs(remainingMs);
-  }
-
-  audioFadeAnimation = requestAnimationFrame(updateTerminalAudioFade);
-}
-
-function startTerminalAudioFade(): void {
-  clearTerminalAudioFade();
-  video.volume = 1;
-  audioFadeAnimation = requestAnimationFrame(updateTerminalAudioFade);
-}
-
 function releaseMedia(): void {
   clearWatchdog();
-  clearTerminalAudioFade();
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -312,8 +282,7 @@ async function startPlayback(startAtLocal: number): Promise<void> {
   );
 
   // A chamada única de play() inicia o vídeo MP4 e sua faixa AAC integrada em conjunto.
-  // O ganho termina antes do EOF e permanece em zero durante a cauda terminal.
-  video.volume = 1;
+  // O fade terminal já está gravado na própria faixa de áudio.
   const playPromise = video.play();
   layer.classList.add("visible");
 
@@ -323,8 +292,6 @@ async function startPlayback(startAtLocal: number): Promise<void> {
     await closeWithError("PLAY", error);
     return;
   }
-
-  startTerminalAudioFade();
 
   diagnostics = {
     ...diagnostics,
@@ -367,8 +334,6 @@ async function initialize(): Promise<void> {
   }
 
   video.addEventListener("ended", () => {
-    clearTerminalAudioFade();
-    video.volume = 0;
     void finishNormally().catch((error: unknown) => {
       console.error("[cinematic-sync] Falha no encerramento normal.", error);
     });
