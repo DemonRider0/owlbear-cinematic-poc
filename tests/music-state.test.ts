@@ -222,6 +222,31 @@ describe("music state anchors", () => {
       fromPositionSeconds:
         CINEMATIC_OUTRO_MUSIC.sourceTrackPositionAtStartSeconds,
     });
+    const videoEndsAtGm =
+      state.cinematic?.videoEndsAtGm ?? Number.NaN;
+    const terminalRampStartsAtGm =
+      videoEndsAtGm - CINEMATIC_OUTRO_MUSIC.terminalGainRampMs;
+    expect(state.gainTransition).toEqual({
+      startAtGm: terminalRampStartsAtGm,
+      endAtGm: videoEndsAtGm,
+      fromGain: CINEMATIC_OUTRO_MUSIC.targetGain,
+      toGain: CINEMATIC_OUTRO_MUSIC.closingGain,
+    });
+    expect(musicGainAtGm(state, terminalRampStartsAtGm)).toBeCloseTo(
+      CINEMATIC_OUTRO_MUSIC.targetGain,
+      9,
+    );
+    expect(
+      musicGainAtGm(
+        state,
+        terminalRampStartsAtGm +
+          CINEMATIC_OUTRO_MUSIC.terminalGainRampMs / 2,
+      ),
+    ).toBeCloseTo(0.266513468, 9);
+    expect(musicGainAtGm(state, videoEndsAtGm)).toBeCloseTo(
+      CINEMATIC_OUTRO_MUSIC.closingGain,
+      9,
+    );
     expect(
       CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds +
         CINEMATIC_OUTRO_MUSIC.durationMs / 1_000,
@@ -253,29 +278,35 @@ describe("music state anchors", () => {
       startAtGm: cinematic.cinematic?.videoEndsAtGm,
       endAtGm:
         (cinematic.cinematic?.videoEndsAtGm ?? Number.NaN) + 4_000,
-      fromGain: CINEMATIC_OUTRO_MUSIC.targetGain,
+      fromGain: CINEMATIC_OUTRO_MUSIC.closingGain,
       toGain: 1,
     });
     expect(musicGainAtGm(completed, completed.anchorAtGm)).toBeCloseTo(
-      0.251188643,
+      CINEMATIC_OUTRO_MUSIC.closingGain,
       9,
     );
     expect(musicGainAtGm(completed, completed.anchorAtGm + 1_000)).toBeCloseTo(
-      0.368190418,
+      0.39405105971875,
       9,
     );
     expect(musicGainAtGm(completed, completed.anchorAtGm + 2_000)).toBeCloseTo(
-      0.625594322,
-      8,
+      0.6409191465,
+      9,
     );
     expect(musicGainAtGm(completed, completed.anchorAtGm + 3_000)).toBeCloseTo(
-      0.882998225,
+      0.88778723328125,
       9,
     );
     expect(musicGainAtGm(completed, completed.anchorAtGm + 4_000)).toBe(1);
     expect(musicPositionAtGm(completed, completed.anchorAtGm + 5_000)).toBeCloseTo(
       41.25,
       6,
+    );
+    expect(musicGainAtGm(completed, completed.anchorAtGm)).toBe(
+      musicGainAtGm(cinematic, completed.anchorAtGm),
+    );
+    expect(musicGainAtGm(completed, completed.anchorAtGm + 1)).toBeGreaterThan(
+      CINEMATIC_OUTRO_MUSIC.closingGain,
     );
     expect(isMusicState(completed)).toBe(true);
   });

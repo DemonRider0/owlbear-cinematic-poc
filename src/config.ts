@@ -127,6 +127,8 @@ export const CINEMATIC_OUTRO_MUSIC = {
   startsAtVideoSeconds: 32.875604167,
   durationMs: MUSIC_CINEMATIC_DIRECT_FADE_IN_MS,
   targetGain: 0.251188643,
+  terminalGainRampMs: 500,
+  closingGain: 0.281838293,
   normalizationMs: MUSIC_CINEMATIC_POST_FADE_IN_MS,
   sourceTrackPositionAtStartSeconds: 10.6953125,
 } as const satisfies {
@@ -135,6 +137,8 @@ export const CINEMATIC_OUTRO_MUSIC = {
   startsAtVideoSeconds: number;
   durationMs: number;
   targetGain: number;
+  terminalGainRampMs: number;
+  closingGain: number;
   normalizationMs: number;
   sourceTrackPositionAtStartSeconds: number;
 };

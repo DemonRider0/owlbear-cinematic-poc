@@ -13,6 +13,7 @@ import {
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
+  musicGainAtGm,
 } from "../src/music-state";
 
 class FakeAudio extends EventTarget {
@@ -439,7 +440,26 @@ describe("persistent music player", () => {
     expect(cinematicTrack.paused).toBe(true);
 
     await vi.advanceTimersByTimeAsync(
-      (handoff?.videoEndsAtGm ?? 0) - Date.now(),
+      (handoff?.videoEndsAtGm ?? 0) -
+        CINEMATIC_OUTRO_MUSIC.terminalGainRampMs -
+        Date.now(),
+    );
+    expect(manualTrack.volume).toBeCloseTo(
+      CINEMATIC_OUTRO_MUSIC.targetGain,
+      6,
+    );
+
+    await vi.advanceTimersByTimeAsync(
+      CINEMATIC_OUTRO_MUSIC.terminalGainRampMs / 2,
+    );
+    player.reconcile(cinematic);
+    expect(manualTrack.volume).toBeCloseTo(
+      musicGainAtGm(cinematic, Date.now()),
+      9,
+    );
+
+    await vi.advanceTimersByTimeAsync(
+      CINEMATIC_OUTRO_MUSIC.terminalGainRampMs / 2,
     );
     const completed = createPostCinematicMusicState(
       cinematic,
@@ -450,14 +470,14 @@ describe("persistent music player", () => {
     player.applyState(completed);
     await vi.advanceTimersByTimeAsync(0);
     expect(manualTrack.volume).toBeCloseTo(
-      CINEMATIC_OUTRO_MUSIC.targetGain,
+      CINEMATIC_OUTRO_MUSIC.closingGain,
       7,
     );
 
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(manualTrack.volume).toBeCloseTo(0.368190418, 3);
+    expect(manualTrack.volume).toBeCloseTo(0.39405106, 3);
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(manualTrack.volume).toBeCloseTo(0.625594322, 3);
+    expect(manualTrack.volume).toBeCloseTo(0.640919147, 3);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(manualTrack.volume).toBe(1);
     expect(cinematicTrack.paused).toBe(true);

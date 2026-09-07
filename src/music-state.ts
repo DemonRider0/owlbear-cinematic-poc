@@ -313,6 +313,8 @@ export function createCinematicMusicState(
   issuedAtGm: number,
   videoStartAtGm: number,
 ): MusicState {
+  const videoEndsAtGm =
+    videoStartAtGm + CINEMATIC_MUSIC_SYNC.videoDurationSeconds * 1_000;
   return {
     schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
     stateId,
@@ -324,6 +326,13 @@ export function createCinematicMusicState(
     playing: true,
     positionSeconds: CINEMATIC_MUSIC_SYNC.playerPositionAtVideoStartSeconds,
     anchorAtGm: videoStartAtGm,
+    gainTransition: {
+      startAtGm:
+        videoEndsAtGm - CINEMATIC_OUTRO_MUSIC.terminalGainRampMs,
+      endAtGm: videoEndsAtGm,
+      fromGain: CINEMATIC_OUTRO_MUSIC.targetGain,
+      toGain: CINEMATIC_OUTRO_MUSIC.closingGain,
+    },
     cinematic: {
       videoStartAtGm,
       audibleAtGm:
@@ -338,8 +347,7 @@ export function createCinematicMusicState(
       normalizedAtGm:
         videoStartAtGm +
         CINEMATIC_MUSIC_SYNC.gainNormalizationEndsAtVideoSeconds * 1_000,
-      videoEndsAtGm:
-        videoStartAtGm + CINEMATIC_MUSIC_SYNC.videoDurationSeconds * 1_000,
+      videoEndsAtGm,
       fadeInMs: CINEMATIC_MUSIC_SYNC.fadeInMs,
       embeddedTrackGain: CINEMATIC_MUSIC_SYNC.embeddedTrackGain,
       outro: {
@@ -369,6 +377,7 @@ export function createPostCinematicMusicState(
   if (current.mode !== "CINEMATIC" || !handoff || !outro) {
     throw new Error("Estado cinematic sem transição musical final.");
   }
+  const closingGain = musicGainAtGm(current, handoff.videoEndsAtGm);
 
   return {
     schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
@@ -386,12 +395,12 @@ export function createPostCinematicMusicState(
     ),
     anchorAtGm: handoff.videoEndsAtGm,
     gainTransition:
-      (outro.targetGain ?? 1) < 1 && (outro.normalizationMs ?? 0) > 0
+      closingGain < 1 && (outro.normalizationMs ?? 0) > 0
         ? {
             startAtGm: handoff.videoEndsAtGm,
             endAtGm:
               handoff.videoEndsAtGm + (outro.normalizationMs ?? 0),
-            fromGain: outro.targetGain ?? 1,
+            fromGain: closingGain,
             toGain: 1,
           }
         : undefined,
@@ -419,7 +428,7 @@ export function createAuthorityTakeoverMusicState(
     outro &&
     previousAuthorityNowGm >= handoff.videoEndsAtGm
   ) {
-    const targetGain = outro.targetGain ?? 1;
+    const targetGain = musicGainAtGm(current, handoff.videoEndsAtGm);
     const normalizationMs = outro.normalizationMs ?? 0;
     const gainTransitionEndsAtGm =
       handoff.videoEndsAtGm + normalizationMs;

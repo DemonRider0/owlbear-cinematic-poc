@@ -364,10 +364,10 @@ export class MusicPlayer {
       trackId: state.trackId,
       updatedAtGm: state.updatedAtGm,
     });
-    this.beginManualGainTransition(deck, state);
+    this.beginGainTransition(deck, state);
   }
 
-  private beginManualGainTransition(
+  private beginGainTransition(
     deck: TrackDeck,
     state: MusicState,
   ): void {
@@ -379,6 +379,12 @@ export class MusicPlayer {
       transition.startAtGm,
       state.updatedAtGm,
     );
+    if (Date.now() < startAtLocal) {
+      this.scheduleAt(startAtLocal, () => {
+        this.beginGainTransition(deck, state);
+      });
+      return;
+    }
     this.runAbsoluteRamp(
       startAtLocal,
       transition.endAtGm - transition.startAtGm,
@@ -879,7 +885,7 @@ export class MusicPlayer {
       this.pauseAllExceptDecks([newDeck]);
       this.pauseVoice(this.inactiveVoice(newDeck));
       this.setVoiceGain(newVoice, 1);
-      this.setTrackGain(newDeck, targetGain);
+      this.setTrackGain(newDeck, musicGainAtGm(state, nowGm));
       this.startVoice(
         newVoice,
         this.positionForTimeline(newTimeline, nowGm),
@@ -887,6 +893,7 @@ export class MusicPlayer {
         false,
       );
       this.beginDeckLoopScheduling(newDeck, newTimeline);
+      this.beginGainTransition(newDeck, state);
       return;
     }
 
@@ -901,6 +908,7 @@ export class MusicPlayer {
       false,
     );
     this.beginDeckLoopScheduling(newDeck, newTimeline);
+    this.beginGainTransition(newDeck, state);
 
     const transitionStartLocal = this.clock.toLocalTime(
       outro.startAtGm,
@@ -940,7 +948,7 @@ export class MusicPlayer {
     if (outro && gmNow >= outro.startAtGm + outro.durationMs) {
       const deck = this.requiredDeck(outro.trackId);
       const voice = this.activeVoice(deck);
-      this.setTrackGain(deck, outro.targetGain ?? 1);
+      this.setTrackGain(deck, musicGainAtGm(state, gmNow));
       const expected = normalizeMusicPosition(
         outro.trackId,
         outro.positionSeconds + (gmNow - outro.startAtGm) / 1_000,
