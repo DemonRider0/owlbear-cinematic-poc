@@ -9,6 +9,7 @@ import {
 } from "../src/config";
 import {
   createCinematicMusicState,
+  createEmfMusicState,
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
@@ -90,7 +91,7 @@ describe("persistent music player", () => {
 
   it("keeps the previous track alive through a synchronized crossfade", async () => {
     const player = createPlayer();
-    expect(FakeAudio.instances).toHaveLength(4);
+    expect(FakeAudio.instances).toHaveLength(7);
     expect(FakeAudio.instances.every((audio) => audio.loop === false)).toBe(true);
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
     const playing = createManualMusicState(
@@ -138,6 +139,146 @@ describe("persistent music player", () => {
     expect(oldTrack.volume).toBe(0);
     expect(newTrack.paused).toBe(false);
     expect(newTrack.volume).toBe(1);
+  });
+
+  it("stops music for an EMF, ends in silence and replays it from zero", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const playing = createManualMusicState(
+      initial,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_000,
+    );
+    player.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const music = audioAt(0);
+    const emf1 = audioAt(4);
+    const first = createEmfMusicState(
+      playing,
+      "emf-1",
+      "gm-1",
+      "emf-first",
+      1_000,
+      1_500,
+    );
+    player.applyState(first);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(music.paused).toBe(false);
+    expect(emf1.paused).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(music.paused).toBe(true);
+    expect(emf1.paused).toBe(false);
+    expect(emf1.currentTime).toBe(0);
+    expect(emf1.loop).toBe(false);
+
+    emf1.dispatchEvent(new Event("ended"));
+    expect(emf1.paused).toBe(true);
+    expect(FakeAudio.instances.every((audio) => audio.paused)).toBe(true);
+
+    const replay = createEmfMusicState(
+      first,
+      "emf-1",
+      "gm-1",
+      "emf-replay",
+      1_500,
+      2_000,
+    );
+    player.applyState(replay);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(emf1.paused).toBe(false);
+    expect(emf1.currentTime).toBe(0);
+
+    vi.setSystemTime(
+      (replay.emf?.startAtGm ?? 0) +
+        Math.ceil((replay.emf?.durationSeconds ?? 0) * 1_000) +
+        1,
+    );
+    player.reconcile(replay);
+    expect(FakeAudio.instances.every((audio) => audio.paused)).toBe(true);
+  });
+
+  it("stops the active EMF before starting another EMF", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const emf1State = createEmfMusicState(
+      initial,
+      "emf-1",
+      "gm-1",
+      "emf-1-state",
+      1_000,
+      1_000,
+    );
+    player.applyState(emf1State);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const emf1 = audioAt(4);
+    const emf2 = audioAt(5);
+    expect(emf1.paused).toBe(false);
+    const emf2State = createEmfMusicState(
+      emf1State,
+      "emf-2",
+      "gm-1",
+      "emf-2-state",
+      1_000,
+      1_500,
+    );
+    player.applyState(emf2State);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(emf1.paused).toBe(true);
+    expect(emf2.paused).toBe(false);
+    expect(emf2.currentTime).toBe(0);
+    expect(emf2.loop).toBe(false);
+  });
+
+  it("stops an EMF and starts a manually selected music track normally", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const emf = createEmfMusicState(
+      initial,
+      "emf-3",
+      "gm-1",
+      "emf-state",
+      1_000,
+      1_000,
+    );
+    player.applyState(emf);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const emf3 = audioAt(6);
+    expect(emf3.paused).toBe(false);
+    const selected = createManualMusicState(
+      emf,
+      { type: "SELECT_TRACK", trackId: "o-idolo" },
+      "gm-1",
+      "selected-state",
+      1_000,
+      1_250,
+    );
+    player.applyState(selected);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(emf3.paused).toBe(true);
+    expect(audioAt(2).paused).toBe(true);
+
+    const music = createManualMusicState(
+      selected,
+      { type: "PLAY" },
+      "gm-1",
+      "manual-state",
+      1_250,
+      1_500,
+    );
+    player.applyState(music);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(audioAt(2).paused).toBe(false);
+    expect(audioAt(2).volume).toBe(1);
   });
 
   it("applies pause and seek only at their shared anchor", async () => {

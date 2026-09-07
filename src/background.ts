@@ -19,6 +19,7 @@ import { MusicPlayer } from "./music-player";
 import {
   compareMusicStates,
   createAuthorityTakeoverMusicState,
+  createEmfMusicState,
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
@@ -539,14 +540,26 @@ async function handleMusicControl(
     await broadcastMusicState(musicState, message.requestId, senderConnectionId);
     return;
   }
-  const next = createManualMusicState(
-    musicState,
-    message.action,
-    identity.connectionId,
-    crypto.randomUUID(),
-    issuedAtGm,
-    issuedAtGm + MUSIC_COMMAND_DELAY_MS,
-  );
+  const stateId = crypto.randomUUID();
+  const applyAtGm = issuedAtGm + MUSIC_COMMAND_DELAY_MS;
+  const next =
+    message.action.type === "PLAY_EMF"
+      ? createEmfMusicState(
+          musicState,
+          message.action.emfId,
+          identity.connectionId,
+          stateId,
+          issuedAtGm,
+          applyAtGm,
+        )
+      : createManualMusicState(
+          musicState,
+          message.action,
+          identity.connectionId,
+          stateId,
+          issuedAtGm,
+          applyAtGm,
+        );
   await publishMusicState(next, message.requestId);
 }
 

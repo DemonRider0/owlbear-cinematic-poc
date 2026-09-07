@@ -1,4 +1,5 @@
 import {
+  EMFS,
   MUSIC_CINEMATIC_FADE_OUT_MS,
   MUSIC_DRIFT_TOLERANCE_SECONDS,
   MUSIC_GAIN_STEP_MS,
@@ -8,9 +9,12 @@ import {
   getMusicLoopCycleSeconds,
   getMusicTrackConfig,
   getMusicTrackRequestUrl,
+  getEmfRequestUrl,
+  type EmfId,
   type MusicTrackId,
 } from "./config";
 import {
+  emfPositionAtGm,
   musicGainAtGm,
   musicPositionAtGm,
   nextMusicLoopSeamAtGm,
@@ -41,6 +45,12 @@ interface TrackDeck {
   trackGain: number;
   trackId: MusicTrackId;
   voices: [TrackVoice, TrackVoice];
+}
+
+interface EmfVoice {
+  element: HTMLAudioElement;
+  id: EmfId;
+  playToken: number;
 }
 
 interface DeckTimeline {
@@ -77,12 +87,14 @@ function circularDistance(
 
 export class MusicPlayer {
   private readonly clock: MusicClock;
+  private readonly emfs = new Map<EmfId, EmfVoice>();
   private readonly tracks = new Map<MusicTrackId, TrackDeck>();
   private readonly timers = new Set<Timer>();
   private appliedStateId: string | undefined;
   private currentState: MusicState | undefined;
   private pendingActivationTimer: Timer | undefined;
   private receivedStateId: string | undefined;
+  private completedEmfStateId: string | undefined;
 
   constructor(clock: MusicClock) {
     this.clock = clock;
@@ -115,12 +127,39 @@ export class MusicPlayer {
         voices: [createVoice(0), createVoice(1)],
       });
     }
+    for (const config of EMFS) {
+      const element = new Audio();
+      element.preload = "auto";
+      element.loop = false;
+      element.volume = 1;
+      element.src = getEmfRequestUrl(config.id);
+      element.addEventListener("error", () => {
+        console.error(
+          `[cinematic-sync] Falha ao carregar ${config.label}.`,
+          element.error,
+        );
+      });
+      this.emfs.set(config.id, {
+        element,
+        id: config.id,
+        playToken: 0,
+      });
+    }
   }
 
   async preload(): Promise<void> {
+    const candidates = [
+      ...this.allVoices().map(({ element, trackId, slot }) => ({
+        description: `música ${trackId}, voz ${slot + 1}`,
+        element,
+      })),
+      ...[...this.emfs.values()].map(({ element, id }) => ({
+        description: id.toUpperCase().replace("-", " "),
+        element,
+      })),
+    ];
     await Promise.all(
-      this.allVoices().map(async (voice) => {
-        const { element, trackId, slot } = voice;
+      candidates.map(async ({ description, element }) => {
         if (element.readyState >= 3) {
           return;
         }
@@ -140,16 +179,14 @@ export class MusicPlayer {
           const failed = (): void => {
             cleanup();
             reject(
-              new Error(
-                `Falha no preload musical (${trackId}, voz ${slot + 1}).`,
-              ),
+              new Error(`Falha no preload de áudio (${description}).`),
             );
           };
           const timeout = window.setTimeout(() => {
             cleanup();
             reject(
               new DOMException(
-                `Preload musical excedeu ${MUSIC_PRELOAD_TIMEOUT_MS} ms (${trackId}, voz ${slot + 1}).`,
+                `Preload de áudio excedeu ${MUSIC_PRELOAD_TIMEOUT_MS} ms (${description}).`,
                 "TimeoutError",
               ),
             );
@@ -179,7 +216,7 @@ export class MusicPlayer {
       state.updatedAtGm,
     );
     if (
-      state.mode === "MANUAL" &&
+      (state.mode === "MANUAL" || state.mode === "EMF") &&
       this.currentState !== undefined &&
       activationAtLocal > Date.now()
     ) {
@@ -202,17 +239,26 @@ export class MusicPlayer {
 
     if (state.mode === "CINEMATIC") {
       this.applyCinematicState(state);
+    } else if (state.mode === "EMF") {
+      this.applyEmfState(state);
     } else {
       this.applyManualState(state);
     }
   }
 
   reconcile(state: MusicState): void {
-    if (!state.playing || state.stateId !== this.appliedStateId) {
+    if (state.stateId !== this.appliedStateId) {
       return;
     }
 
     const gmNow = this.clock.gmNow();
+    if (state.mode === "EMF") {
+      this.reconcileEmf(state, gmNow);
+      return;
+    }
+    if (!state.playing) {
+      return;
+    }
     if (gmNow < state.anchorAtGm) {
       return;
     }
@@ -259,6 +305,7 @@ export class MusicPlayer {
 
     if (!state.playing) {
       this.scheduleAt(applyAtLocal, () => {
+        this.pauseAllEmfs();
         this.pauseAll();
         const deck = this.requiredDeck(state.trackId);
         this.setPosition(
@@ -299,6 +346,7 @@ export class MusicPlayer {
     const deck = this.requiredDeck(state.trackId);
     const voice = this.activeVoice(deck);
     const nowGm = this.clock.gmNow();
+    this.pauseAllEmfs();
     this.pauseAllExceptDecks([deck]);
     this.pauseVoice(this.inactiveVoice(deck));
     this.setTrackGain(deck, musicGainAtGm(state, nowGm));
@@ -359,6 +407,7 @@ export class MusicPlayer {
       return;
     }
 
+    this.pauseAllEmfs();
     const nowGm = this.clock.gmNow();
     const progress = clamp01(
       (Date.now() - transitionStartLocal) / transition.durationMs,
@@ -652,6 +701,114 @@ export class MusicPlayer {
     );
   }
 
+  private applyEmfState(state: MusicState): void {
+    const emf = state.emf;
+    if (!emf) {
+      return;
+    }
+    const startAtLocal = this.clock.toLocalTime(
+      emf.startAtGm,
+      state.updatedAtGm,
+    );
+    this.scheduleAt(startAtLocal, () => {
+      this.startEmf(state);
+    });
+  }
+
+  private startEmf(state: MusicState): void {
+    const emf = state.emf;
+    if (
+      state.mode !== "EMF" ||
+      !emf ||
+      state.stateId !== this.appliedStateId
+    ) {
+      return;
+    }
+
+    this.pauseAll();
+    this.pauseAllEmfs();
+    this.completedEmfStateId = undefined;
+    const position = emfPositionAtGm(state, this.clock.gmNow());
+    if (position === undefined || position >= emf.durationSeconds) {
+      return;
+    }
+
+    const voice = this.requiredEmf(emf.id);
+    voice.element.loop = false;
+    voice.element.volume = 1;
+    this.setPosition(voice.element, position);
+    const token = ++voice.playToken;
+    voice.element.addEventListener(
+      "ended",
+      () => {
+        if (
+          voice.playToken === token &&
+          state.stateId === this.appliedStateId
+        ) {
+          voice.element.pause();
+          this.completedEmfStateId = state.stateId;
+        }
+      },
+      { once: true },
+    );
+    void voice.element
+      .play()
+      .then(() => {
+        if (
+          voice.playToken !== token ||
+          state.stateId !== this.appliedStateId
+        ) {
+          return;
+        }
+        const expected = emfPositionAtGm(state, this.clock.gmNow());
+        if (
+          expected !== undefined &&
+          expected < emf.durationSeconds &&
+          Math.abs(voice.element.currentTime - expected) >
+            MUSIC_DRIFT_TOLERANCE_SECONDS
+        ) {
+          this.setPosition(voice.element, expected);
+        }
+      })
+      .catch((error: unknown) => {
+        if (voice.playToken !== token) {
+          return;
+        }
+        console.error(
+          `[cinematic-sync] Reprodução de ${emf.id.toUpperCase().replace("-", " ")} bloqueada.`,
+          error,
+        );
+      });
+  }
+
+  private reconcileEmf(state: MusicState, gmNow: number): void {
+    const emf = state.emf;
+    if (!emf || gmNow < emf.startAtGm) {
+      return;
+    }
+    const position = emfPositionAtGm(state, gmNow);
+    if (
+      position === undefined ||
+      position >= emf.durationSeconds ||
+      this.completedEmfStateId === state.stateId
+    ) {
+      this.pauseAllEmfs();
+      return;
+    }
+
+    const voice = this.requiredEmf(emf.id);
+    if (voice.element.paused) {
+      this.startEmf(state);
+      return;
+    }
+    if (
+      Math.abs(voice.element.currentTime - position) >
+      MUSIC_DRIFT_TOLERANCE_SECONDS
+    ) {
+      this.setPosition(voice.element, position);
+    }
+  }
+
   private applyCinematicState(state: MusicState): void {
     const handoff = state.cinematic;
     if (!handoff) {
@@ -671,6 +828,7 @@ export class MusicPlayer {
     if (state.stateId !== this.appliedStateId || !state.cinematic) {
       return;
     }
+    this.pauseAllEmfs();
     const outro = state.cinematic.outro;
     if (outro && this.clock.gmNow() >= outro.startAtGm) {
       this.startCinematicOutro(state);
@@ -987,6 +1145,17 @@ export class MusicPlayer {
     return [...this.tracks.values()].flatMap((deck) => deck.voices);
   }
 
+  private pauseEmf(voice: EmfVoice): void {
+    voice.playToken += 1;
+    voice.element.pause();
+  }
+
+  private pauseAllEmfs(): void {
+    for (const voice of this.emfs.values()) {
+      this.pauseEmf(voice);
+    }
+  }
+
   private pauseVoice(voice: TrackVoice): void {
     voice.playToken += 1;
     voice.element.pause();
@@ -1041,6 +1210,14 @@ export class MusicPlayer {
       throw new Error(`Deck de áudio ausente para ${trackId}.`);
     }
     return deck;
+  }
+
+  private requiredEmf(emfId: EmfId): EmfVoice {
+    const voice = this.emfs.get(emfId);
+    if (!voice) {
+      throw new Error(`Áudio ausente para ${emfId}.`);
+    }
+    return voice;
   }
 
   private scheduleAt(localTime: number, callback: () => void): void {

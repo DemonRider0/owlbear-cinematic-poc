@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CINEMATIC_OUTRO_MUSIC,
   CINEMATIC_MUSIC_SYNC,
+  EMFS,
   MUSIC_LOOP_CROSSFADE_MS,
   MUSIC_TRACK_CROSSFADE_MS,
   getMusicLoopCycleSeconds,
@@ -9,10 +10,12 @@ import {
 import {
   createAuthorityTakeoverMusicState,
   createCinematicMusicState,
+  createEmfMusicState,
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
   isMusicState,
+  isEmfActive,
   musicGainAtGm,
   musicPositionAtGm,
   nextMusicLoopSeamAtGm,
@@ -81,6 +84,78 @@ describe("music state anchors", () => {
     expect(paused.positionSeconds).toBeCloseTo(4, 6);
     expect(musicPositionAtGm(paused, 50_000)).toBeCloseTo(4, 6);
     expect(seeked.positionSeconds).toBe(92.25);
+  });
+
+  it("describes an exclusive synchronized EMF one-shot", () => {
+    const initial = createInitialMusicState("gm-1", "initial", 0);
+    const playing = createManualMusicState(
+      initial,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      100,
+      500,
+    );
+    const emf = createEmfMusicState(
+      playing,
+      "emf-1",
+      "gm-1",
+      "emf-1-play",
+      4_000,
+      4_500,
+    );
+
+    expect(emf.mode).toBe("EMF");
+    expect(emf.playing).toBe(false);
+    expect(emf.trackId).toBe("o-porao");
+    expect(emf.positionSeconds).toBeCloseTo(4, 6);
+    expect(emf.anchorAtGm).toBe(4_500);
+    expect(emf.emf).toEqual({
+      id: "emf-1",
+      startAtGm: 4_500,
+      durationSeconds: EMFS[0].durationSeconds,
+    });
+    expect(isEmfActive(emf, 4_499)).toBe(false);
+    expect(isEmfActive(emf, 4_500)).toBe(true);
+    expect(
+      isEmfActive(emf, 4_500 + EMFS[0].durationSeconds * 1_000),
+    ).toBe(false);
+    expect(isMusicState(emf)).toBe(true);
+  });
+
+  it("restarts the same EMF with a new anchor and returns to manual music only on command", () => {
+    const initial = createInitialMusicState("gm-1", "initial", 0);
+    const first = createEmfMusicState(
+      initial,
+      "emf-2",
+      "gm-1",
+      "emf-first",
+      100,
+      500,
+    );
+    const replay = createEmfMusicState(
+      first,
+      "emf-2",
+      "gm-1",
+      "emf-replay",
+      20_000,
+      20_500,
+    );
+    const resumed = createManualMusicState(
+      replay,
+      { type: "PLAY" },
+      "gm-1",
+      "music-resumed",
+      21_000,
+      21_500,
+    );
+
+    expect(replay.stateId).toBe("emf-replay");
+    expect(replay.emf?.startAtGm).toBe(20_500);
+    expect(replay.emf?.id).toBe("emf-2");
+    expect(resumed.mode).toBe("MANUAL");
+    expect(resumed.playing).toBe(true);
+    expect(resumed.emf).toBeUndefined();
   });
 
   it("describes an anchored equal-power crossfade on track selection", () => {

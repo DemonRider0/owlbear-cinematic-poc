@@ -3,14 +3,16 @@ import {
   CINEMATIC_MUSIC_SYNC,
   DEFAULT_MUSIC_TRACK_ID,
   MUSIC_TRACK_CROSSFADE_MS,
+  getEmfConfig,
   getMusicLoopCycleSeconds,
   getMusicTrackConfig,
+  type EmfId,
   type MusicTrackId,
 } from "./config";
 
 export const MUSIC_STATE_SCHEMA_VERSION = 1;
 
-export type MusicMode = "MANUAL" | "CINEMATIC";
+export type MusicMode = "MANUAL" | "CINEMATIC" | "EMF";
 
 export interface MusicTransition {
   kind: "TRACK_CROSSFADE";
@@ -49,6 +51,12 @@ export interface CinematicMusicOutro {
   fromPositionSeconds: number;
 }
 
+export interface EmfPlayback {
+  id: EmfId;
+  startAtGm: number;
+  durationSeconds: number;
+}
+
 export interface MusicState {
   schemaVersion: typeof MUSIC_STATE_SCHEMA_VERSION;
   stateId: string;
@@ -63,13 +71,18 @@ export interface MusicState {
   gainTransition?: MusicGainTransition;
   transition?: MusicTransition;
   cinematic?: CinematicMusicHandoff;
+  emf?: EmfPlayback;
 }
 
-export type MusicControlAction =
+export type ManualMusicControlAction =
   | { type: "PLAY" }
   | { type: "PAUSE" }
   | { type: "SEEK"; positionSeconds: number }
   | { type: "SELECT_TRACK"; trackId: MusicTrackId };
+
+export type MusicControlAction =
+  | ManualMusicControlAction
+  | { type: "PLAY_EMF"; emfId: EmfId };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -85,6 +98,10 @@ function isNonEmptyString(value: unknown): value is string {
 
 export function isMusicTrackId(value: unknown): value is MusicTrackId {
   return value === "o-porao" || value === "o-idolo";
+}
+
+export function isEmfId(value: unknown): value is EmfId {
+  return value === "emf-1" || value === "emf-2" || value === "emf-3";
 }
 
 export function normalizeMusicPosition(
@@ -148,6 +165,25 @@ export function musicGainAtGm(state: MusicState, gmTime: number): number {
   );
 }
 
+export function emfPositionAtGm(
+  state: MusicState,
+  gmTime: number,
+): number | undefined {
+  if (state.mode !== "EMF" || !state.emf) {
+    return undefined;
+  }
+  return Math.max(0, gmTime - state.emf.startAtGm) / 1_000;
+}
+
+export function isEmfActive(state: MusicState, gmTime: number): boolean {
+  const position = emfPositionAtGm(state, gmTime);
+  return (
+    position !== undefined &&
+    gmTime >= (state.emf?.startAtGm ?? Number.POSITIVE_INFINITY) &&
+    position < (state.emf?.durationSeconds ?? 0)
+  );
+}
+
 export function isCinematicMusicLocked(
   state: MusicState,
   gmTime: number,
@@ -187,7 +223,7 @@ export function createInitialMusicState(
 
 export function createManualMusicState(
   current: MusicState,
-  action: MusicControlAction,
+  action: ManualMusicControlAction,
   authorityConnectionId: string,
   stateId: string,
   issuedAtGm: number,
@@ -241,6 +277,33 @@ export function createManualMusicState(
       };
     }
   }
+}
+
+export function createEmfMusicState(
+  current: MusicState,
+  emfId: EmfId,
+  authorityConnectionId: string,
+  stateId: string,
+  issuedAtGm: number,
+  applyAtGm: number,
+): MusicState {
+  return {
+    schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
+    stateId,
+    revision: current.revision + 1,
+    authorityConnectionId,
+    updatedAtGm: Math.max(issuedAtGm, current.updatedAtGm + 1),
+    mode: "EMF",
+    trackId: current.trackId,
+    playing: false,
+    positionSeconds: musicPositionAtGm(current, applyAtGm),
+    anchorAtGm: applyAtGm,
+    emf: {
+      id: emfId,
+      startAtGm: applyAtGm,
+      durationSeconds: getEmfConfig(emfId).durationSeconds,
+    },
+  };
 }
 
 export function createCinematicMusicState(
@@ -437,6 +500,12 @@ export function createAuthorityTakeoverMusicState(
             : undefined,
         }
       : undefined,
+    emf: current.emf
+      ? {
+          ...current.emf,
+          startAtGm: current.emf.startAtGm + clockDeltaMs,
+        }
+      : undefined,
   };
 }
 
@@ -452,9 +521,21 @@ export function isMusicControlAction(value: unknown): value is MusicControlActio
       return isFiniteNumber(value.positionSeconds) && value.positionSeconds >= 0;
     case "SELECT_TRACK":
       return isMusicTrackId(value.trackId);
+    case "PLAY_EMF":
+      return isEmfId(value.emfId);
     default:
       return false;
   }
+}
+
+function isEmfPlayback(value: unknown): value is EmfPlayback {
+  return (
+    isRecord(value) &&
+    isEmfId(value.id) &&
+    isFiniteNumber(value.startAtGm) &&
+    isFiniteNumber(value.durationSeconds) &&
+    value.durationSeconds === getEmfConfig(value.id).durationSeconds
+  );
 }
 
 function isMusicTransition(value: unknown): value is MusicTransition {
@@ -578,7 +659,9 @@ export function isMusicState(value: unknown): value is MusicState {
     Number(value.revision) < 0 ||
     !isNonEmptyString(value.authorityConnectionId) ||
     !isFiniteNumber(value.updatedAtGm) ||
-    (value.mode !== "MANUAL" && value.mode !== "CINEMATIC") ||
+    (value.mode !== "MANUAL" &&
+      value.mode !== "CINEMATIC" &&
+      value.mode !== "EMF") ||
     !isMusicTrackId(value.trackId) ||
     typeof value.playing !== "boolean" ||
     !isFiniteNumber(value.positionSeconds) ||
@@ -600,8 +683,22 @@ export function isMusicState(value: unknown): value is MusicState {
   if (value.cinematic !== undefined && !isCinematicMusicHandoff(value.cinematic)) {
     return false;
   }
+  if (value.emf !== undefined && !isEmfPlayback(value.emf)) {
+    return false;
+  }
   return (
-    (value.mode === "MANUAL" && value.cinematic === undefined) ||
-    (value.mode === "CINEMATIC" && value.playing && value.cinematic !== undefined)
+    (value.mode === "MANUAL" &&
+      value.cinematic === undefined &&
+      value.emf === undefined) ||
+    (value.mode === "CINEMATIC" &&
+      value.playing &&
+      value.cinematic !== undefined &&
+      value.emf === undefined) ||
+    (value.mode === "EMF" &&
+      !value.playing &&
+      value.cinematic === undefined &&
+      value.transition === undefined &&
+      value.gainTransition === undefined &&
+      value.emf !== undefined)
   );
 }

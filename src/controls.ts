@@ -3,10 +3,12 @@ import {
   BROADCAST_CHANNEL,
   CINEMATIC_MUSIC_SYNC,
   CONTROL_POPOVER_ID,
+  EMFS,
   MUSIC_TRACK_CROSSFADE_MS,
   MUSIC_TRACKS,
   PLAY_START_DELAY_MS,
   STATUS_REFRESH_INTERVAL_MS,
+  getEmfConfig,
   getMusicLoopCycleSeconds,
   getMusicTrackConfig,
 } from "./config";
@@ -14,6 +16,7 @@ import {
   compareMusicStates,
   createCinematicMusicState,
   isCinematicMusicLocked,
+  isEmfActive,
   musicPositionAtGm,
   type MusicControlAction,
   type MusicState,
@@ -68,6 +71,10 @@ const musicDuration = requiredElement<HTMLElement>("#music-duration");
 const musicStatus = requiredElement<HTMLElement>("#music-status");
 const musicTrackButtons = [
   ...document.querySelectorAll<HTMLButtonElement>("[data-track-id]"),
+];
+const emfStatus = requiredElement<HTMLElement>("#emf-status");
+const emfButtons = [
+  ...document.querySelectorAll<HTMLButtonElement>("[data-emf-id]"),
 ];
 
 let localConnectionId = "";
@@ -201,15 +208,22 @@ function renderMusic(): void {
   for (const button of musicTrackButtons) {
     button.disabled = disabled;
   }
+  for (const button of emfButtons) {
+    button.disabled = disabled;
+  }
 
   if (!state) {
     musicCurrent.textContent = "Carregando faixas…";
     musicStatus.textContent = "Aguardando estado sincronizado…";
+    emfStatus.textContent = "Aguardando estado sincronizado…";
     return;
   }
 
+  const now = Date.now();
   const track = getMusicTrackConfig(state.trackId);
-  const position = musicPositionAtGm(state, Date.now());
+  const position = musicPositionAtGm(state, now);
+  const activeEmf = state.emf ? getEmfConfig(state.emf.id) : undefined;
+  const emfPlaying = isEmfActive(state, now);
   musicCurrent.textContent = track.label;
   musicToggle.textContent = state.playing ? "⏸" : "▶";
   musicToggle.setAttribute(
@@ -228,12 +242,29 @@ function renderMusic(): void {
       ? "Sincronizando comando…"
       : state.mode === "CINEMATIC"
         ? "Continuidade automática da cinemática"
+        : state.mode === "EMF"
+          ? `Música parada durante ${activeEmf?.label ?? "EMF"}`
         : state.playing
           ? "Reproduzindo em todos os clientes"
           : "Pausada em todos os clientes";
 
   for (const button of musicTrackButtons) {
     const selected = button.dataset.trackId === state.trackId;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  }
+
+  emfStatus.textContent = sendingMusicCommand
+    ? "Sincronizando comando…"
+    : state.mode !== "EMF" || !activeEmf
+      ? "Nenhum EMF em reprodução."
+      : now < (state.emf?.startAtGm ?? 0)
+        ? `${activeEmf.label} agendado…`
+        : emfPlaying
+          ? `${activeEmf.label} em reprodução em todos os clientes`
+          : `${activeEmf.label} concluído — silêncio`;
+  for (const button of emfButtons) {
+    const selected = emfPlaying && button.dataset.emfId === state.emf?.id;
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-pressed", String(selected));
   }
@@ -571,6 +602,19 @@ async function initialize(): Promise<void> {
       void sendMusicControl({ type: "SELECT_TRACK", trackId: track.id }).catch(
         (error: unknown) => {
           console.error("[cinematic-sync] Falha ao trocar faixa.", error);
+        },
+      );
+    });
+  }
+  for (const button of emfButtons) {
+    button.addEventListener("click", () => {
+      const emf = EMFS.find(
+        (candidate) => candidate.id === button.dataset.emfId,
+      );
+      if (!emf) return;
+      void sendMusicControl({ type: "PLAY_EMF", emfId: emf.id }).catch(
+        (error: unknown) => {
+          console.error("[cinematic-sync] Falha ao reproduzir EMF.", error);
         },
       );
     });

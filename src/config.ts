@@ -23,6 +23,15 @@ export interface MusicTrackConfig {
   };
 }
 
+export type EmfId = "emf-1" | "emf-2" | "emf-3";
+
+export interface EmfConfig {
+  id: EmfId;
+  label: string;
+  url: string;
+  durationSeconds: number;
+}
+
 export const MUSIC_TRACKS = [
   {
     id: "o-porao",
@@ -48,7 +57,29 @@ export const MUSIC_TRACKS = [
 
 export const DEFAULT_MUSIC_TRACK_ID: MusicTrackId = "o-porao";
 export const MUSIC_ASSET_VERSION = "v1";
+export const EMF_ASSET_VERSION = "v1";
 export const MUSIC_ROOM_METADATA_KEY = `${EXTENSION_ID}/music-state`;
+
+export const EMFS = [
+  {
+    id: "emf-1",
+    label: "EMF 1",
+    url: "./assets/emf/emf-1.ogg",
+    durationSeconds: 9.473741,
+  },
+  {
+    id: "emf-2",
+    label: "EMF 2",
+    url: "./assets/emf/emf-2.ogg",
+    durationSeconds: 11.702857,
+  },
+  {
+    id: "emf-3",
+    label: "EMF 3",
+    url: "./assets/emf/emf-3.ogg",
+    durationSeconds: 9.068005,
+  },
+] as const satisfies readonly EmfConfig[];
 
 export const MUSIC_COMMAND_DELAY_MS = 500;
 export const MUSIC_TRACK_CROSSFADE_MS = 4_000;
@@ -188,5 +219,20 @@ export function getMusicTrackRequestUrl(trackId: MusicTrackId): string {
   const track = getMusicTrackConfig(trackId);
   const url = new URL(track.url, window.location.href);
   url.searchParams.set("music-cache", MUSIC_ASSET_VERSION);
+  return url.href;
+}
+
+export function getEmfConfig(emfId: EmfId): EmfConfig {
+  const emf = EMFS.find((candidate) => candidate.id === emfId);
+  if (!emf) {
+    throw new Error(`EMF desconhecido: ${emfId}`);
+  }
+  return emf;
+}
+
+export function getEmfRequestUrl(emfId: EmfId): string {
+  const emf = getEmfConfig(emfId);
+  const url = new URL(emf.url, window.location.href);
+  url.searchParams.set("emf-cache", EMF_ASSET_VERSION);
   return url.href;
 }

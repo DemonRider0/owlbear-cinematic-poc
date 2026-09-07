@@ -45,6 +45,12 @@ describe("broadcast protocol", () => {
       issuedAt: 9_000,
       action: { type: "SEEK", positionSeconds: 42.5 },
     });
+    const emfControl = protocolMessage<MusicControlMessage>({
+      kind: "MUSIC_CONTROL",
+      requestId: "emf-control-1",
+      issuedAt: 9_001,
+      action: { type: "PLAY_EMF", emfId: "emf-1" },
+    });
     const snapshot = protocolMessage<MusicStateMessage>({
       kind: "MUSIC_STATE",
       issuedAt: 10_001,
@@ -57,6 +63,7 @@ describe("broadcast protocol", () => {
     });
 
     expect(isProtocolMessage(control)).toBe(true);
+    expect(isProtocolMessage(emfControl)).toBe(true);
     expect(isProtocolMessage(snapshot)).toBe(true);
     expect(isProtocolMessage(request)).toBe(true);
   });
@@ -97,6 +104,15 @@ describe("broadcast protocol", () => {
         requestId: "request-1",
         issuedAt: 1_000,
         action: { type: "SEEK", positionSeconds: -1 },
+      }),
+    ).toBe(false);
+    expect(
+      isProtocolMessage({
+        version: PROTOCOL_VERSION,
+        kind: "MUSIC_CONTROL",
+        requestId: "request-1",
+        issuedAt: 1_000,
+        action: { type: "PLAY_EMF", emfId: "emf-4" },
       }),
     ).toBe(false);
   });
