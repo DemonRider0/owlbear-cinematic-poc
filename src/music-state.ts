@@ -20,6 +20,13 @@ export interface MusicTransition {
   durationMs: number;
 }
 
+export interface MusicGainTransition {
+  startAtGm: number;
+  endAtGm: number;
+  fromGain: number;
+  toGain: number;
+}
+
 export interface CinematicMusicHandoff {
   videoStartAtGm: number;
   audibleAtGm: number;
@@ -38,6 +45,7 @@ export interface CinematicMusicOutro {
   startAtGm: number;
   durationMs: number;
   targetGain?: number;
+  normalizationMs?: number;
   fromPositionSeconds: number;
 }
 
@@ -52,6 +60,7 @@ export interface MusicState {
   playing: boolean;
   positionSeconds: number;
   anchorAtGm: number;
+  gainTransition?: MusicGainTransition;
   transition?: MusicTransition;
   cinematic?: CinematicMusicHandoff;
 }
@@ -121,6 +130,24 @@ export function musicPositionAtGm(
     : normalizeMusicPosition(state.trackId, position);
 }
 
+export function musicGainAtGm(state: MusicState, gmTime: number): number {
+  const transition = state.gainTransition;
+  if (!transition || gmTime >= transition.endAtGm) {
+    return transition?.toGain ?? 1;
+  }
+  if (gmTime <= transition.startAtGm) {
+    return transition.fromGain;
+  }
+  const progress =
+    (gmTime - transition.startAtGm) /
+    (transition.endAtGm - transition.startAtGm);
+  const smoothProgress = progress * progress * (3 - 2 * progress);
+  return (
+    transition.fromGain +
+    (transition.toGain - transition.fromGain) * smoothProgress
+  );
+}
+
 export function isCinematicMusicLocked(
   state: MusicState,
   gmTime: number,
@@ -178,6 +205,7 @@ export function createManualMusicState(
     playing: current.playing,
     positionSeconds: currentPosition,
     anchorAtGm: applyAtGm,
+    gainTransition: current.gainTransition,
   };
 
   switch (action.type) {
@@ -259,6 +287,7 @@ export function createCinematicMusicState(
           CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds * 1_000,
         durationMs: CINEMATIC_OUTRO_MUSIC.durationMs,
         targetGain: CINEMATIC_OUTRO_MUSIC.targetGain,
+        normalizationMs: CINEMATIC_OUTRO_MUSIC.normalizationMs,
         fromPositionSeconds:
           CINEMATIC_OUTRO_MUSIC.sourceTrackPositionAtStartSeconds,
       },
@@ -293,6 +322,16 @@ export function createPostCinematicMusicState(
         (handoff.videoEndsAtGm - outro.startAtGm) / 1_000,
     ),
     anchorAtGm: handoff.videoEndsAtGm,
+    gainTransition:
+      (outro.targetGain ?? 1) < 1 && (outro.normalizationMs ?? 0) > 0
+        ? {
+            startAtGm: handoff.videoEndsAtGm,
+            endAtGm:
+              handoff.videoEndsAtGm + (outro.normalizationMs ?? 0),
+            fromGain: outro.targetGain ?? 1,
+            toGain: 1,
+          }
+        : undefined,
   };
 }
 
@@ -317,6 +356,11 @@ export function createAuthorityTakeoverMusicState(
     outro &&
     previousAuthorityNowGm >= handoff.videoEndsAtGm
   ) {
+    const targetGain = outro.targetGain ?? 1;
+    const normalizationMs = outro.normalizationMs ?? 0;
+    const gainTransitionEndsAtGm =
+      handoff.videoEndsAtGm + normalizationMs;
+    const clockDeltaMs = newAuthorityNowGm - previousAuthorityNowGm;
     return {
       schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
       stateId,
@@ -332,6 +376,17 @@ export function createAuthorityTakeoverMusicState(
           Math.max(0, previousAuthorityNowGm - outro.startAtGm) / 1_000,
       ),
       anchorAtGm: newAuthorityNowGm,
+      gainTransition:
+        targetGain < 1 &&
+        normalizationMs > 0 &&
+        previousAuthorityNowGm < gainTransitionEndsAtGm
+          ? {
+              startAtGm: handoff.videoEndsAtGm + clockDeltaMs,
+              endAtGm: gainTransitionEndsAtGm + clockDeltaMs,
+              fromGain: targetGain,
+              toGain: 1,
+            }
+          : undefined,
     };
   }
 
@@ -343,6 +398,13 @@ export function createAuthorityTakeoverMusicState(
     authorityConnectionId,
     updatedAtGm,
     anchorAtGm: current.anchorAtGm + clockDeltaMs,
+    gainTransition: current.gainTransition
+      ? {
+          ...current.gainTransition,
+          startAtGm: current.gainTransition.startAtGm + clockDeltaMs,
+          endAtGm: current.gainTransition.endAtGm + clockDeltaMs,
+        }
+      : undefined,
     transition: current.transition
       ? {
           ...current.transition,
@@ -405,6 +467,21 @@ function isMusicTransition(value: unknown): value is MusicTransition {
     isFiniteNumber(value.startAtGm) &&
     isFiniteNumber(value.durationMs) &&
     value.durationMs > 0
+  );
+}
+
+function isMusicGainTransition(value: unknown): value is MusicGainTransition {
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value.startAtGm) &&
+    isFiniteNumber(value.endAtGm) &&
+    value.endAtGm > value.startAtGm &&
+    isFiniteNumber(value.fromGain) &&
+    value.fromGain >= 0 &&
+    value.fromGain <= 1 &&
+    isFiniteNumber(value.toGain) &&
+    value.toGain >= 0 &&
+    value.toGain <= 1
   );
 }
 
@@ -474,6 +551,7 @@ function isCinematicMusicHandoff(value: unknown): value is CinematicMusicHandoff
 
 function isCinematicMusicOutro(value: unknown): value is CinematicMusicOutro {
   const targetGain = isRecord(value) ? value.targetGain : undefined;
+  const normalizationMs = isRecord(value) ? value.normalizationMs : undefined;
   return (
     isRecord(value) &&
     isMusicTrackId(value.trackId) &&
@@ -484,6 +562,8 @@ function isCinematicMusicOutro(value: unknown): value is CinematicMusicOutro {
     value.durationMs > 0 &&
     (targetGain === undefined ||
       (isFiniteNumber(targetGain) && targetGain > 0 && targetGain <= 1)) &&
+    (normalizationMs === undefined ||
+      (isFiniteNumber(normalizationMs) && normalizationMs >= 0)) &&
     isFiniteNumber(value.fromPositionSeconds) &&
     value.fromPositionSeconds >= 0
   );
@@ -509,6 +589,12 @@ export function isMusicState(value: unknown): value is MusicState {
   }
 
   if (value.transition !== undefined && !isMusicTransition(value.transition)) {
+    return false;
+  }
+  if (
+    value.gainTransition !== undefined &&
+    !isMusicGainTransition(value.gainTransition)
+  ) {
     return false;
   }
   if (value.cinematic !== undefined && !isCinematicMusicHandoff(value.cinematic)) {

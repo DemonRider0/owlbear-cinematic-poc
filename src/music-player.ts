@@ -11,6 +11,7 @@ import {
   type MusicTrackId,
 } from "./config";
 import {
+  musicGainAtGm,
   musicPositionAtGm,
   nextMusicLoopSeamAtGm,
   normalizeMusicMediaPosition,
@@ -227,6 +228,7 @@ export class MusicPlayer {
     }
 
     const deck = this.requiredDeck(state.trackId);
+    this.setTrackGain(deck, musicGainAtGm(state, gmNow));
     if (
       deck.loopInProgressUntilGm !== undefined &&
       gmNow < deck.loopInProgressUntilGm
@@ -296,13 +298,14 @@ export class MusicPlayer {
     }
     const deck = this.requiredDeck(state.trackId);
     const voice = this.activeVoice(deck);
+    const nowGm = this.clock.gmNow();
     this.pauseAllExceptDecks([deck]);
     this.pauseVoice(this.inactiveVoice(deck));
-    this.setTrackGain(deck, 1);
+    this.setTrackGain(deck, musicGainAtGm(state, nowGm));
     this.setVoiceGain(voice, 1);
     this.startVoice(
       voice,
-      musicPositionAtGm(state, this.clock.gmNow()),
+      musicPositionAtGm(state, nowGm),
       preserveIfSynchronized,
       true,
     );
@@ -313,6 +316,38 @@ export class MusicPlayer {
       trackId: state.trackId,
       updatedAtGm: state.updatedAtGm,
     });
+    this.beginManualGainTransition(deck, state);
+  }
+
+  private beginManualGainTransition(
+    deck: TrackDeck,
+    state: MusicState,
+  ): void {
+    const transition = state.gainTransition;
+    if (!transition || this.clock.gmNow() >= transition.endAtGm) {
+      return;
+    }
+    const startAtLocal = this.clock.toLocalTime(
+      transition.startAtGm,
+      state.updatedAtGm,
+    );
+    this.runAbsoluteRamp(
+      startAtLocal,
+      transition.endAtGm - transition.startAtGm,
+      () => {
+        if (state.stateId === this.appliedStateId) {
+          this.setTrackGain(
+            deck,
+            musicGainAtGm(state, this.clock.gmNow()),
+          );
+        }
+      },
+      () => {
+        if (state.stateId === this.appliedStateId) {
+          this.setTrackGain(deck, transition.toGain);
+        }
+      },
+    );
   }
 
   private startManualCrossfade(
@@ -332,6 +367,7 @@ export class MusicPlayer {
     const newDeck = this.requiredDeck(state.trackId);
     const oldVoice = this.activeVoice(oldDeck);
     const newVoice = this.activeVoice(newDeck);
+    const outputGain = musicGainAtGm(state, nowGm);
     let newPlaybackStarted = !newVoice.element.paused;
     let transitionCompleted = false;
     const completeSwap = (): void => {
@@ -339,7 +375,10 @@ export class MusicPlayer {
         return;
       }
       this.pauseDeck(oldDeck);
-      this.setTrackGain(newDeck, 1);
+      this.setTrackGain(
+        newDeck,
+        musicGainAtGm(state, this.clock.gmNow()),
+      );
     };
     const transitionEndsAtGm =
       transition.startAtGm + transition.durationMs;
@@ -364,8 +403,8 @@ export class MusicPlayer {
     this.pauseVoice(this.inactiveVoice(newDeck));
     this.setVoiceGain(oldVoice, 1);
     this.setVoiceGain(newVoice, 1);
-    this.setTrackGain(oldDeck, equalPowerOut(progress));
-    this.setTrackGain(newDeck, equalPowerIn(progress));
+    this.setTrackGain(oldDeck, outputGain * equalPowerOut(progress));
+    this.setTrackGain(newDeck, outputGain * equalPowerIn(progress));
     this.startVoice(
       oldVoice,
       this.positionForTimeline(oldTimeline, nowGm),
@@ -391,15 +430,28 @@ export class MusicPlayer {
       transitionStartLocal,
       transition.durationMs,
       (nextProgress) => {
-        this.setTrackGain(oldDeck, equalPowerOut(nextProgress));
-        this.setTrackGain(newDeck, equalPowerIn(nextProgress));
+        const currentOutputGain = musicGainAtGm(
+          state,
+          this.clock.gmNow(),
+        );
+        this.setTrackGain(
+          oldDeck,
+          currentOutputGain * equalPowerOut(nextProgress),
+        );
+        this.setTrackGain(
+          newDeck,
+          currentOutputGain * equalPowerIn(nextProgress),
+        );
       },
       () => {
         transitionCompleted = true;
         if (newPlaybackStarted) {
           completeSwap();
         } else {
-          this.setTrackGain(oldDeck, 1);
+          this.setTrackGain(
+            oldDeck,
+            musicGainAtGm(state, this.clock.gmNow()),
+          );
           this.setTrackGain(newDeck, 0);
         }
       },

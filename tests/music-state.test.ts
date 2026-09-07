@@ -13,6 +13,7 @@ import {
   createManualMusicState,
   createPostCinematicMusicState,
   isMusicState,
+  musicGainAtGm,
   musicPositionAtGm,
   nextMusicLoopSeamAtGm,
 } from "../src/music-state";
@@ -142,13 +143,14 @@ describe("music state anchors", () => {
         11_500 + CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds * 1_000,
       durationMs: CINEMATIC_OUTRO_MUSIC.durationMs,
       targetGain: CINEMATIC_OUTRO_MUSIC.targetGain,
+      normalizationMs: CINEMATIC_OUTRO_MUSIC.normalizationMs,
       fromPositionSeconds:
         CINEMATIC_OUTRO_MUSIC.sourceTrackPositionAtStartSeconds,
     });
     expect(
       CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds +
         CINEMATIC_OUTRO_MUSIC.durationMs / 1_000,
-    ).toBeCloseTo(33.85, 9);
+    ).toBeCloseTo(33.835940079, 6);
     expect(isMusicState(state)).toBe(true);
   });
 
@@ -171,9 +173,33 @@ describe("music state anchors", () => {
     expect(completed.trackId).toBe("o-porao");
     expect(completed.playing).toBe(true);
     expect(completed.anchorAtGm).toBe(cinematic.cinematic?.videoEndsAtGm);
-    expect(completed.positionSeconds).toBeCloseTo(210.575604167, 6);
+    expect(completed.positionSeconds).toBeCloseTo(36.25, 6);
+    expect(completed.gainTransition).toEqual({
+      startAtGm: cinematic.cinematic?.videoEndsAtGm,
+      endAtGm:
+        (cinematic.cinematic?.videoEndsAtGm ?? Number.NaN) + 4_000,
+      fromGain: CINEMATIC_OUTRO_MUSIC.targetGain,
+      toGain: 1,
+    });
+    expect(musicGainAtGm(completed, completed.anchorAtGm)).toBeCloseTo(
+      0.251188643,
+      9,
+    );
+    expect(musicGainAtGm(completed, completed.anchorAtGm + 1_000)).toBeCloseTo(
+      0.368190418,
+      9,
+    );
+    expect(musicGainAtGm(completed, completed.anchorAtGm + 2_000)).toBeCloseTo(
+      0.625594322,
+      8,
+    );
+    expect(musicGainAtGm(completed, completed.anchorAtGm + 3_000)).toBeCloseTo(
+      0.882998225,
+      9,
+    );
+    expect(musicGainAtGm(completed, completed.anchorAtGm + 4_000)).toBe(1);
     expect(musicPositionAtGm(completed, completed.anchorAtGm + 5_000)).toBeCloseTo(
-      215.575604167,
+      41.25,
       6,
     );
     expect(isMusicState(completed)).toBe(true);
@@ -233,7 +259,7 @@ describe("music state anchors", () => {
     expect(takeover.mode).toBe("MANUAL");
     expect(takeover.trackId).toBe("o-porao");
     expect(takeover.playing).toBe(true);
-    expect(takeover.positionSeconds).toBeCloseTo(215.575604167, 6);
+    expect(takeover.positionSeconds).toBeCloseTo(41.25, 6);
     expect(takeover.anchorAtGm).toBe(90_000);
     expect(takeover.cinematic).toBeUndefined();
     expect(isMusicState(takeover)).toBe(true);

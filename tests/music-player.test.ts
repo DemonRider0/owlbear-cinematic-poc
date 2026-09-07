@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MusicPlayer } from "../src/music-player";
 import {
+  CINEMATIC_OUTRO_MUSIC,
   MUSIC_GAIN_STEP_MS,
   MUSIC_LOOP_CROSSFADE_MS,
   MUSIC_TRACK_CROSSFADE_MS,
@@ -10,6 +11,7 @@ import {
   createCinematicMusicState,
   createInitialMusicState,
   createManualMusicState,
+  createPostCinematicMusicState,
 } from "../src/music-state";
 
 class FakeAudio extends EventTarget {
@@ -274,20 +276,51 @@ describe("persistent music player", () => {
       (outro?.startAtGm ?? 0) - (handoff?.videoStartAtGm ?? 0),
     );
     expect(manualTrack.paused).toBe(false);
-    expect(manualTrack.currentTime).toBeCloseTo(204.55, 3);
+    expect(manualTrack.currentTime).toBeCloseTo(
+      CINEMATIC_OUTRO_MUSIC.positionSeconds,
+      3,
+    );
     expect(manualTrack.volume).toBe(0);
     expect(cinematicTrack.paused).toBe(true);
     expect(audioAt(3).paused).toBe(true);
 
     await vi.advanceTimersByTimeAsync((outro?.durationMs ?? 0) / 2);
-    expect(manualTrack.volume).toBeGreaterThan(0.65);
-    expect(manualTrack.volume).toBeLessThan(0.75);
+    expect(manualTrack.volume).toBeGreaterThan(0.16);
+    expect(manualTrack.volume).toBeLessThan(0.19);
     expect(cinematicTrack.paused).toBe(true);
 
     await vi.advanceTimersByTimeAsync((outro?.durationMs ?? 0) / 2 + 50);
     expect(manualTrack.paused).toBe(false);
+    expect(manualTrack.volume).toBeCloseTo(
+      CINEMATIC_OUTRO_MUSIC.targetGain,
+      7,
+    );
+    expect(cinematicTrack.paused).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(
+      (handoff?.videoEndsAtGm ?? 0) - Date.now(),
+    );
+    const completed = createPostCinematicMusicState(
+      cinematic,
+      "gm-1",
+      "manual-after-cinematic",
+      handoff?.videoEndsAtGm ?? Number.NaN,
+    );
+    player.applyState(completed);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(manualTrack.volume).toBeCloseTo(
+      CINEMATIC_OUTRO_MUSIC.targetGain,
+      7,
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(manualTrack.volume).toBeCloseTo(0.368190418, 3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(manualTrack.volume).toBeCloseTo(0.625594322, 3);
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(manualTrack.volume).toBe(1);
     expect(cinematicTrack.paused).toBe(true);
+    expect(audioAt(3).paused).toBe(true);
   });
 
   it("alternates two compressed voices across two scheduled seams", async () => {

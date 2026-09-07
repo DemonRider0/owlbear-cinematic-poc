@@ -55,7 +55,8 @@ export const MUSIC_TRACK_CROSSFADE_MS = 4_000;
 export const MUSIC_LOOP_CROSSFADE_MS = 300;
 export const MUSIC_CINEMATIC_FADE_OUT_MS = 500;
 export const MUSIC_CINEMATIC_FADE_IN_MS = 700;
-export const MUSIC_CINEMATIC_DIRECT_FADE_IN_MS = 750;
+export const MUSIC_CINEMATIC_DIRECT_FADE_IN_MS = 960.335912;
+export const MUSIC_CINEMATIC_POST_FADE_IN_MS = 4_000;
 export const MUSIC_GAIN_STEP_MS = 40;
 export const MUSIC_PRELOAD_TIMEOUT_MS = 2 * 60_000;
 export const MUSIC_DRIFT_CHECK_INTERVAL_MS = 5_000;
@@ -91,44 +92,49 @@ export const CINEMATIC_MUSIC_SYNC = {
 
 export const CINEMATIC_OUTRO_MUSIC = {
   trackId: "o-porao",
-  positionSeconds: 204.55,
-  startsAtVideoSeconds: 33.1,
+  positionSeconds: 30,
+  startsAtVideoSeconds: 32.875604167,
   durationMs: MUSIC_CINEMATIC_DIRECT_FADE_IN_MS,
-  targetGain: 1,
-  sourceTrackPositionAtStartSeconds: 10.919708333,
+  targetGain: 0.251188643,
+  normalizationMs: MUSIC_CINEMATIC_POST_FADE_IN_MS,
+  sourceTrackPositionAtStartSeconds: 10.6953125,
 } as const satisfies {
   trackId: MusicTrackId;
   positionSeconds: number;
   startsAtVideoSeconds: number;
   durationMs: number;
   targetGain: number;
+  normalizationMs: number;
   sourceTrackPositionAtStartSeconds: number;
 };
 
 export const CINEMATIC_OUTRO_CANDIDATES = [
   {
-    positionSeconds: 204.55,
-    score: 0.135844,
-    rmsDbfs: -14.6365,
-    transientDb: 0.2633,
-    spectralDistance: 0.752574,
-    chromaSimilarity: 0.904498,
+    positionSeconds: 30,
+    score: 0.233913,
+    rmsDbfs: -9.9214,
+    transientDb: 0.3672,
+    spectralDistance: 0.736004,
+    chromaSimilarity: 0.810344,
+    rhythmSimilarity: 0.64375,
   },
   {
-    positionSeconds: 31.15,
-    score: 0.226083,
-    rmsDbfs: -10.4311,
-    transientDb: 0.0035,
-    spectralDistance: 0.782138,
-    chromaSimilarity: 0.795697,
+    positionSeconds: 63.5,
+    score: 0.273377,
+    rmsDbfs: -9.573,
+    transientDb: 0.4509,
+    spectralDistance: 0.830935,
+    chromaSimilarity: 0.71928,
+    rhythmSimilarity: 0.588538,
   },
   {
-    positionSeconds: 63.3,
-    score: 0.272331,
-    rmsDbfs: -9.7474,
-    transientDb: 0.7531,
-    spectralDistance: 0.828545,
-    chromaSimilarity: 0.73287,
+    positionSeconds: 254.5,
+    score: 0.284293,
+    rmsDbfs: -11.2997,
+    transientDb: -0.0441,
+    spectralDistance: 0.737772,
+    chromaSimilarity: 0.855554,
+    rhythmSimilarity: 0.370871,
   },
 ] as const;
 
