@@ -15,7 +15,6 @@ import {
   nextMusicLoopSeamAtGm,
   normalizeMusicMediaPosition,
   normalizeMusicPosition,
-  type CinematicMusicHandoff,
   type MusicState,
 } from "./music-state";
 
@@ -64,11 +63,6 @@ function equalPowerIn(progress: number): number {
 
 function equalPowerOut(progress: number): number {
   return Math.cos(clamp01(progress) * Math.PI * 0.5);
-}
-
-function smoothStep(progress: number): number {
-  const clamped = clamp01(progress);
-  return clamped * clamped * (3 - 2 * clamped);
 }
 
 function circularDistance(
@@ -638,82 +632,16 @@ export class MusicPlayer {
     if (!handoff) {
       return;
     }
-    const deck = this.requiredDeck(state.trackId);
-    const voice = this.activeVoice(deck);
-    const nowGm = this.clock.gmNow();
-    const position = normalizeMusicMediaPosition(
-      state.trackId,
-      state.positionSeconds +
-        Math.max(0, nowGm - state.anchorAtGm) / 1_000,
-    );
-    this.pauseAllExceptDecks([deck]);
-    this.pauseVoice(this.inactiveVoice(deck));
-    this.setVoiceGain(voice, 1);
-    this.setTrackGain(deck, this.cinematicBridgeGainAtGm(handoff, nowGm));
-    this.startVoice(voice, position, false, false);
-
-    const mediaDuration = getMusicTrackConfig(state.trackId).durationSeconds;
-    const firstWrapAtGm =
-      handoff.videoStartAtGm +
-      (mediaDuration - state.positionSeconds) * 1_000;
-    if (
-      firstWrapAtGm > nowGm &&
-      firstWrapAtGm < (handoff.outro?.startAtGm ?? handoff.videoEndsAtGm)
-    ) {
-      const wrapAtLocal = this.clock.toLocalTime(
-        firstWrapAtGm,
+    this.pauseAll();
+    if (handoff.outro) {
+      const outroStartsAtLocal = this.clock.toLocalTime(
+        handoff.outro.startAtGm,
         state.updatedAtGm,
       );
-      this.scheduleAt(wrapAtLocal, () => {
-        this.restartCinematicBridgeAtWrap(state, firstWrapAtGm);
-      });
-    }
-
-    const bridgeEndsAtGm =
-      handoff.outro?.startAtGm ?? handoff.videoEndsAtGm;
-    const bridgeEndsAtLocal = this.clock.toLocalTime(
-      bridgeEndsAtGm,
-      state.updatedAtGm,
-    );
-    this.runUntil(bridgeEndsAtLocal, () => {
-      if (state.stateId === this.appliedStateId) {
-        this.setTrackGain(
-          deck,
-          this.cinematicBridgeGainAtGm(handoff, this.clock.gmNow()),
-        );
-      }
-    });
-    if (handoff.outro) {
-      this.scheduleAt(bridgeEndsAtLocal, () => {
+      this.scheduleAt(outroStartsAtLocal, () => {
         this.startCinematicOutro(state);
       });
     }
-  }
-
-  private restartCinematicBridgeAtWrap(
-    state: MusicState,
-    wrapAtGm: number,
-  ): void {
-    const handoff = state.cinematic;
-    if (!handoff || state.stateId !== this.appliedStateId) {
-      return;
-    }
-    const deck = this.requiredDeck(state.trackId);
-    const outgoing = this.activeVoice(deck);
-    const incoming = this.inactiveVoice(deck);
-    deck.activeSlot = incoming.slot;
-    this.pauseVoice(outgoing);
-    this.setVoiceGain(incoming, 1);
-    this.startVoice(
-      incoming,
-      Math.max(0, this.clock.gmNow() - wrapAtGm) / 1_000,
-      false,
-      false,
-    );
-    this.setTrackGain(
-      deck,
-      this.cinematicBridgeGainAtGm(handoff, this.clock.gmNow()),
-    );
   }
 
   private startCinematicOutro(state: MusicState): void {
@@ -723,14 +651,12 @@ export class MusicPlayer {
       return;
     }
     const nowGm = this.clock.gmNow();
-    const elapsedSeconds = Math.max(0, nowGm - outro.startAtGm) / 1_000;
     const progress = clamp01(
       (nowGm - outro.startAtGm) / outro.durationMs,
     );
-    const oldDeck = this.requiredDeck(state.trackId);
     const newDeck = this.requiredDeck(outro.trackId);
-    const oldVoice = this.activeVoice(oldDeck);
     const newVoice = this.activeVoice(newDeck);
+    const targetGain = outro.targetGain ?? 1;
     const newTimeline: DeckTimeline = {
       anchorAtGm: outro.startAtGm,
       positionSeconds: outro.positionSeconds,
@@ -743,7 +669,7 @@ export class MusicPlayer {
       this.pauseAllExceptDecks([newDeck]);
       this.pauseVoice(this.inactiveVoice(newDeck));
       this.setVoiceGain(newVoice, 1);
-      this.setTrackGain(newDeck, 1);
+      this.setTrackGain(newDeck, targetGain);
       this.startVoice(
         newVoice,
         this.positionForTimeline(newTimeline, nowGm),
@@ -754,22 +680,10 @@ export class MusicPlayer {
       return;
     }
 
-    this.pauseAllExceptDecks([oldDeck, newDeck]);
-    this.pauseVoice(this.inactiveVoice(oldDeck));
+    this.pauseAllExceptDecks([newDeck]);
     this.pauseVoice(this.inactiveVoice(newDeck));
-    this.setVoiceGain(oldVoice, 1);
     this.setVoiceGain(newVoice, 1);
-    this.setTrackGain(oldDeck, equalPowerOut(progress));
-    this.setTrackGain(newDeck, equalPowerIn(progress));
-    this.startVoice(
-      oldVoice,
-      normalizeMusicMediaPosition(
-        state.trackId,
-        outro.fromPositionSeconds + elapsedSeconds,
-      ),
-      true,
-      false,
-    );
+    this.setTrackGain(newDeck, targetGain * equalPowerIn(progress));
     this.startVoice(
       newVoice,
       this.positionForTimeline(newTimeline, nowGm),
@@ -786,52 +700,18 @@ export class MusicPlayer {
       transitionStartLocal,
       outro.durationMs,
       (nextProgress) => {
-        this.setTrackGain(oldDeck, equalPowerOut(nextProgress));
-        this.setTrackGain(newDeck, equalPowerIn(nextProgress));
+        this.setTrackGain(
+          newDeck,
+          targetGain * equalPowerIn(nextProgress),
+        );
       },
       () => {
         if (state.stateId !== this.appliedStateId) {
           return;
         }
-        this.pauseDeck(oldDeck);
-        this.setTrackGain(newDeck, 1);
+        this.setTrackGain(newDeck, targetGain);
       },
     );
-  }
-
-  private cinematicBridgeGainAtGm(
-    handoff: CinematicMusicHandoff,
-    gmNow: number,
-  ): number {
-    if (gmNow < handoff.audibleAtGm) {
-      return 0;
-    }
-    const embeddedMusicEndsAtGm =
-      handoff.embeddedMusicEndsAtGm ??
-      handoff.audibleAtGm + handoff.fadeInMs;
-    const matchedGain = handoff.embeddedTrackGain ?? 1;
-    if (gmNow < embeddedMusicEndsAtGm) {
-      return (
-        matchedGain *
-        equalPowerIn(
-          (gmNow - handoff.audibleAtGm) /
-            (embeddedMusicEndsAtGm - handoff.audibleAtGm),
-        )
-      );
-    }
-    const normalizedAtGm =
-      handoff.normalizedAtGm ?? embeddedMusicEndsAtGm;
-    if (gmNow < normalizedAtGm) {
-      return (
-        matchedGain +
-        (1 - matchedGain) *
-          smoothStep(
-            (gmNow - embeddedMusicEndsAtGm) /
-              (normalizedAtGm - embeddedMusicEndsAtGm),
-          )
-      );
-    }
-    return 1;
   }
 
   private reconcileCinematic(state: MusicState, gmNow: number): void {
@@ -850,6 +730,7 @@ export class MusicPlayer {
     if (outro && gmNow >= outro.startAtGm + outro.durationMs) {
       const deck = this.requiredDeck(outro.trackId);
       const voice = this.activeVoice(deck);
+      this.setTrackGain(deck, outro.targetGain ?? 1);
       const expected = normalizeMusicPosition(
         outro.trackId,
         outro.positionSeconds + (gmNow - outro.startAtGm) / 1_000,
@@ -866,25 +747,6 @@ export class MusicPlayer {
         this.setPosition(voice.element, expected);
       }
       return;
-    }
-
-    const deck = this.requiredDeck(state.trackId);
-    const voice = this.activeVoice(deck);
-    const expected = normalizeMusicMediaPosition(
-      state.trackId,
-      state.positionSeconds + (gmNow - state.anchorAtGm) / 1_000,
-    );
-    this.setTrackGain(deck, this.cinematicBridgeGainAtGm(handoff, gmNow));
-    if (voice.element.paused) {
-      this.startVoice(voice, expected, false, false);
-    } else if (
-      circularDistance(
-        voice.element.currentTime,
-        expected,
-        getMusicTrackConfig(state.trackId).durationSeconds,
-      ) > MUSIC_DRIFT_TOLERANCE_SECONDS
-    ) {
-      this.setPosition(voice.element, expected);
     }
   }
 
@@ -1140,21 +1002,6 @@ export class MusicPlayer {
       callback();
     }, delay);
     this.timers.add(timer);
-  }
-
-  private runUntil(endAtLocal: number, update: () => void): void {
-    const tick = (): void => {
-      update();
-      if (Date.now() >= endAtLocal) {
-        return;
-      }
-      const timer = window.setTimeout(() => {
-        this.timers.delete(timer);
-        tick();
-      }, MUSIC_GAIN_STEP_MS);
-      this.timers.add(timer);
-    };
-    tick();
   }
 
   private runAbsoluteRamp(

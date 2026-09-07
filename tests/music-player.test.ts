@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MusicPlayer } from "../src/music-player";
 import {
-  CINEMATIC_MUSIC_SYNC,
   MUSIC_GAIN_STEP_MS,
   MUSIC_LOOP_CROSSFADE_MS,
   MUSIC_TRACK_CROSSFADE_MS,
@@ -235,7 +234,7 @@ describe("persistent music player", () => {
     expect(newTrack.volume).toBe(1);
   });
 
-  it("fades manual music out, runs the cinematic track silently and hands it off", async () => {
+  it("fades manual music out and brings O Porão in without audible O Ídolo", async () => {
     const player = createPlayer();
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
     const playing = createManualMusicState(
@@ -265,26 +264,30 @@ describe("persistent music player", () => {
     expect(manualTrack.volume).toBe(0);
 
     await vi.advanceTimersByTimeAsync(980);
-    expect(cinematicTrack.paused).toBe(false);
-    expect(cinematicTrack.volume).toBe(0);
-    expect(cinematicTrack.currentTime).toBeCloseTo(308.847, 3);
-
-    await vi.advanceTimersByTimeAsync(
-      CINEMATIC_MUSIC_SYNC.externalOverlapStartsAtVideoSeconds * 1_000,
-    );
-    const wrappedCinematicTrack = audioAt(3);
     expect(cinematicTrack.paused).toBe(true);
-    expect(wrappedCinematicTrack.volume).toBe(0);
+    expect(cinematicTrack.volume).toBe(0);
+    expect(audioAt(3).paused).toBe(true);
+
+    const handoff = cinematic.cinematic;
+    const outro = handoff?.outro;
     await vi.advanceTimersByTimeAsync(
-      CINEMATIC_MUSIC_SYNC.fadeInMs / 2,
+      (outro?.startAtGm ?? 0) - (handoff?.videoStartAtGm ?? 0),
     );
-    expect(wrappedCinematicTrack.volume).toBeGreaterThan(0.31);
-    expect(wrappedCinematicTrack.volume).toBeLessThan(0.35);
-    await vi.advanceTimersByTimeAsync(
-      CINEMATIC_MUSIC_SYNC.fadeInMs / 2 + 1_300,
-    );
-    expect(wrappedCinematicTrack.paused).toBe(false);
-    expect(wrappedCinematicTrack.volume).toBeGreaterThan(0.95);
+    expect(manualTrack.paused).toBe(false);
+    expect(manualTrack.currentTime).toBeCloseTo(204.55, 3);
+    expect(manualTrack.volume).toBe(0);
+    expect(cinematicTrack.paused).toBe(true);
+    expect(audioAt(3).paused).toBe(true);
+
+    await vi.advanceTimersByTimeAsync((outro?.durationMs ?? 0) / 2);
+    expect(manualTrack.volume).toBeGreaterThan(0.65);
+    expect(manualTrack.volume).toBeLessThan(0.75);
+    expect(cinematicTrack.paused).toBe(true);
+
+    await vi.advanceTimersByTimeAsync((outro?.durationMs ?? 0) / 2 + 50);
+    expect(manualTrack.paused).toBe(false);
+    expect(manualTrack.volume).toBe(1);
+    expect(cinematicTrack.paused).toBe(true);
   });
 
   it("alternates two compressed voices across two scheduled seams", async () => {
@@ -534,39 +537,4 @@ describe("persistent music player", () => {
     expect(audioAt(2).volume).toBe(1);
   });
 
-  it("crossfades to O Porão before the cinematic ends", async () => {
-    const player = createPlayer();
-    const cinematic = createCinematicMusicState(
-      "gm-1",
-      "cinematic",
-      1,
-      1_000,
-      2_500,
-    );
-    player.applyState(cinematic);
-    await vi.advanceTimersByTimeAsync(
-      1_500 +
-        (cinematic.cinematic?.outro?.startAtGm ?? 0) -
-        (cinematic.cinematic?.videoStartAtGm ?? 0),
-    );
-
-    const idolo = audioAt(3);
-    const porao = audioAt(0);
-    expect(idolo.paused).toBe(false);
-    expect(porao.paused).toBe(false);
-    expect(idolo.volume).toBeCloseTo(1, 6);
-    expect(porao.volume).toBeCloseTo(0, 6);
-    expect(porao.currentTime).toBeCloseTo(30.95, 3);
-
-    await vi.advanceTimersByTimeAsync(MUSIC_TRACK_CROSSFADE_MS / 2 + 100);
-    expect(idolo.volume).toBeGreaterThan(0.65);
-    expect(idolo.volume).toBeLessThan(0.75);
-    expect(porao.volume).toBeGreaterThan(0.65);
-    expect(porao.volume).toBeLessThan(0.75);
-
-    await vi.advanceTimersByTimeAsync(MUSIC_TRACK_CROSSFADE_MS / 2);
-    expect(idolo.paused).toBe(true);
-    expect(porao.paused).toBe(false);
-    expect(porao.volume).toBe(1);
-  });
 });

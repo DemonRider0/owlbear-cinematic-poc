@@ -55,6 +55,7 @@ export const MUSIC_TRACK_CROSSFADE_MS = 4_000;
 export const MUSIC_LOOP_CROSSFADE_MS = 300;
 export const MUSIC_CINEMATIC_FADE_OUT_MS = 500;
 export const MUSIC_CINEMATIC_FADE_IN_MS = 700;
+export const MUSIC_CINEMATIC_DIRECT_FADE_IN_MS = 750;
 export const MUSIC_GAIN_STEP_MS = 40;
 export const MUSIC_PRELOAD_TIMEOUT_MS = 2 * 60_000;
 export const MUSIC_DRIFT_CHECK_INTERVAL_MS = 5_000;
@@ -90,42 +91,44 @@ export const CINEMATIC_MUSIC_SYNC = {
 
 export const CINEMATIC_OUTRO_MUSIC = {
   trackId: "o-porao",
-  positionSeconds: 30.95,
-  startsAtVideoSeconds: 35.125604167,
-  durationMs: MUSIC_TRACK_CROSSFADE_MS,
-  sourceTrackPositionAtStartSeconds: 12.9453125,
+  positionSeconds: 204.55,
+  startsAtVideoSeconds: 33.1,
+  durationMs: MUSIC_CINEMATIC_DIRECT_FADE_IN_MS,
+  targetGain: 1,
+  sourceTrackPositionAtStartSeconds: 10.919708333,
 } as const satisfies {
   trackId: MusicTrackId;
   positionSeconds: number;
   startsAtVideoSeconds: number;
   durationMs: number;
+  targetGain: number;
   sourceTrackPositionAtStartSeconds: number;
 };
 
 export const CINEMATIC_OUTRO_CANDIDATES = [
   {
-    positionSeconds: 30.95,
-    score: 0.363416,
-    rmsDbfs: -12.9011,
-    transientDb: 0.8039,
-    spectralDistance: 0.195854,
-    chromaSimilarity: 0.813617,
+    positionSeconds: 204.55,
+    score: 0.135844,
+    rmsDbfs: -14.6365,
+    transientDb: 0.2633,
+    spectralDistance: 0.752574,
+    chromaSimilarity: 0.904498,
+  },
+  {
+    positionSeconds: 31.15,
+    score: 0.226083,
+    rmsDbfs: -10.4311,
+    transientDb: 0.0035,
+    spectralDistance: 0.782138,
+    chromaSimilarity: 0.795697,
   },
   {
     positionSeconds: 63.3,
-    score: 0.370201,
-    rmsDbfs: -12.5534,
-    transientDb: 0.8813,
-    spectralDistance: 0.219849,
-    chromaSimilarity: 0.685495,
-  },
-  {
-    positionSeconds: 204.6,
-    score: 0.425896,
-    rmsDbfs: -15.5642,
-    transientDb: 0.4704,
-    spectralDistance: 0.14064,
-    chromaSimilarity: 0.84167,
+    score: 0.272331,
+    rmsDbfs: -9.7474,
+    transientDb: 0.7531,
+    spectralDistance: 0.828545,
+    chromaSimilarity: 0.73287,
   },
 ] as const;
 

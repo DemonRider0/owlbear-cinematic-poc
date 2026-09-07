@@ -112,7 +112,7 @@ describe("music state anchors", () => {
     });
   });
 
-  it("keeps the cinematic soundtrack on the proven timeline", () => {
+  it("describes the direct cinematic-to-O Porão handoff", () => {
     const state = createCinematicMusicState(
       "gm-1",
       "cinematic-1",
@@ -141,13 +141,14 @@ describe("music state anchors", () => {
       startAtGm:
         11_500 + CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds * 1_000,
       durationMs: CINEMATIC_OUTRO_MUSIC.durationMs,
+      targetGain: CINEMATIC_OUTRO_MUSIC.targetGain,
       fromPositionSeconds:
         CINEMATIC_OUTRO_MUSIC.sourceTrackPositionAtStartSeconds,
     });
     expect(
       CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds +
         CINEMATIC_OUTRO_MUSIC.durationMs / 1_000,
-    ).toBeCloseTo(CINEMATIC_MUSIC_SYNC.videoDurationSeconds, 9);
+    ).toBeCloseTo(33.85, 9);
     expect(isMusicState(state)).toBe(true);
   });
 
@@ -170,9 +171,9 @@ describe("music state anchors", () => {
     expect(completed.trackId).toBe("o-porao");
     expect(completed.playing).toBe(true);
     expect(completed.anchorAtGm).toBe(cinematic.cinematic?.videoEndsAtGm);
-    expect(completed.positionSeconds).toBeCloseTo(34.95, 6);
+    expect(completed.positionSeconds).toBeCloseTo(210.575604167, 6);
     expect(musicPositionAtGm(completed, completed.anchorAtGm + 5_000)).toBeCloseTo(
-      39.95,
+      215.575604167,
       6,
     );
     expect(isMusicState(completed)).toBe(true);
@@ -232,7 +233,7 @@ describe("music state anchors", () => {
     expect(takeover.mode).toBe("MANUAL");
     expect(takeover.trackId).toBe("o-porao");
     expect(takeover.playing).toBe(true);
-    expect(takeover.positionSeconds).toBeCloseTo(39.95, 6);
+    expect(takeover.positionSeconds).toBeCloseTo(215.575604167, 6);
     expect(takeover.anchorAtGm).toBe(90_000);
     expect(takeover.cinematic).toBeUndefined();
     expect(isMusicState(takeover)).toBe(true);

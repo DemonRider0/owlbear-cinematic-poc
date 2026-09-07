@@ -37,6 +37,7 @@ export interface CinematicMusicOutro {
   positionSeconds: number;
   startAtGm: number;
   durationMs: number;
+  targetGain?: number;
   fromPositionSeconds: number;
 }
 
@@ -257,6 +258,7 @@ export function createCinematicMusicState(
           videoStartAtGm +
           CINEMATIC_OUTRO_MUSIC.startsAtVideoSeconds * 1_000,
         durationMs: CINEMATIC_OUTRO_MUSIC.durationMs,
+        targetGain: CINEMATIC_OUTRO_MUSIC.targetGain,
         fromPositionSeconds:
           CINEMATIC_OUTRO_MUSIC.sourceTrackPositionAtStartSeconds,
       },
@@ -471,6 +473,7 @@ function isCinematicMusicHandoff(value: unknown): value is CinematicMusicHandoff
 }
 
 function isCinematicMusicOutro(value: unknown): value is CinematicMusicOutro {
+  const targetGain = isRecord(value) ? value.targetGain : undefined;
   return (
     isRecord(value) &&
     isMusicTrackId(value.trackId) &&
@@ -479,6 +482,8 @@ function isCinematicMusicOutro(value: unknown): value is CinematicMusicOutro {
     isFiniteNumber(value.startAtGm) &&
     isFiniteNumber(value.durationMs) &&
     value.durationMs > 0 &&
+    (targetGain === undefined ||
+      (isFiniteNumber(targetGain) && targetGain > 0 && targetGain <= 1)) &&
     isFiniteNumber(value.fromPositionSeconds) &&
     value.fromPositionSeconds >= 0
   );
