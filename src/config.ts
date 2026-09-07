@@ -180,6 +180,7 @@ export const PLAY_START_DELAY_MS = 1_500;
 export const FADE_IN_MS = 600;
 export const FADE_OUT_MS = 700;
 export const CINEMATIC_AUDIO_FADE_OUT_MS = 120;
+export const CINEMATIC_AUDIO_SILENT_TAIL_MS = 60;
 export const PRELOAD_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 export const MEDIA_PROBE_TIMEOUT_MS = 30_000;
 export const MODAL_PREPARE_TIMEOUT_MS = 30_000;
@@ -189,6 +190,21 @@ export const MODAL_CLOSE_RETRY_MS = 250;
 export const CLOCK_SYNC_SAMPLE_COUNT = 3;
 export const CLOCK_SYNC_SAMPLE_INTERVAL_MS = 300;
 export const STATUS_REFRESH_INTERVAL_MS = 5_000;
+
+export function cinematicAudioGainForRemainingMs(remainingMs: number): number {
+  if (remainingMs <= CINEMATIC_AUDIO_SILENT_TAIL_MS) {
+    return 0;
+  }
+  const fadeStartsAtRemainingMs =
+    CINEMATIC_AUDIO_FADE_OUT_MS + CINEMATIC_AUDIO_SILENT_TAIL_MS;
+  if (remainingMs >= fadeStartsAtRemainingMs) {
+    return 1;
+  }
+  const progress =
+    (fadeStartsAtRemainingMs - remainingMs) /
+    CINEMATIC_AUDIO_FADE_OUT_MS;
+  return Math.cos(progress * Math.PI * 0.5);
+}
 
 export function resolveAppUrl(relativeUrl: string): string {
   return new URL(relativeUrl, window.location.href).href;

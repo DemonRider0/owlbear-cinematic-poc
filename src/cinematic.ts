@@ -1,7 +1,6 @@
 import OBR from "@owlbear-rodeo/sdk";
 import {
   BROADCAST_CHANNEL,
-  CINEMATIC_AUDIO_FADE_OUT_MS,
   CINEMATIC_MODAL_ID,
   FADE_IN_MS,
   FADE_OUT_MS,
@@ -9,6 +8,7 @@ import {
   MODAL_CLOSE_RETRY_MS,
   MODAL_PREPARE_TIMEOUT_MS,
   PLAYBACK_WATCHDOG_GRACE_MS,
+  cinematicAudioGainForRemainingMs,
 } from "./config";
 import { toSerializableError } from "./errors";
 import { getCachedCinematic } from "./media-cache";
@@ -93,7 +93,7 @@ function updateTerminalAudioFade(): void {
 
   if (Number.isFinite(video.duration) && video.duration > 0) {
     const remainingMs = Math.max(0, (video.duration - video.currentTime) * 1_000);
-    video.volume = Math.min(1, remainingMs / CINEMATIC_AUDIO_FADE_OUT_MS);
+    video.volume = cinematicAudioGainForRemainingMs(remainingMs);
   }
 
   audioFadeAnimation = requestAnimationFrame(updateTerminalAudioFade);
@@ -312,7 +312,7 @@ async function startPlayback(startAtLocal: number): Promise<void> {
   );
 
   // A chamada única de play() inicia o vídeo MP4 e sua faixa AAC integrada em conjunto.
-  // Apenas os 120 ms finais têm o ganho reduzido para evitar o corte terminal.
+  // O ganho termina antes do EOF e permanece em zero durante a cauda terminal.
   video.volume = 1;
   const playPromise = video.play();
   layer.classList.add("visible");
