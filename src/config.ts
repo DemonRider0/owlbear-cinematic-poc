@@ -148,6 +148,7 @@ export const CINEMATIC_MODAL_ID = `${EXTENSION_ID}/cinematic`;
 export const PLAY_START_DELAY_MS = 1_500;
 export const FADE_IN_MS = 600;
 export const FADE_OUT_MS = 700;
+export const CINEMATIC_AUDIO_FADE_OUT_MS = 120;
 export const PRELOAD_DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 export const MEDIA_PROBE_TIMEOUT_MS = 30_000;
 export const MODAL_PREPARE_TIMEOUT_MS = 30_000;

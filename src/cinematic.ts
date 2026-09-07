@@ -1,6 +1,7 @@
 import OBR from "@owlbear-rodeo/sdk";
 import {
   BROADCAST_CHANNEL,
+  CINEMATIC_AUDIO_FADE_OUT_MS,
   CINEMATIC_MODAL_ID,
   FADE_IN_MS,
   FADE_OUT_MS,
@@ -41,6 +42,7 @@ let diagnostics: ClientDiagnostics = {
 let objectUrl: string | undefined;
 let finishing = false;
 let watchdog: ReturnType<typeof setTimeout> | undefined;
+let audioFadeAnimation: number | undefined;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
@@ -76,8 +78,36 @@ function clearWatchdog(): void {
   }
 }
 
+function clearTerminalAudioFade(): void {
+  if (audioFadeAnimation !== undefined) {
+    cancelAnimationFrame(audioFadeAnimation);
+    audioFadeAnimation = undefined;
+  }
+}
+
+function updateTerminalAudioFade(): void {
+  audioFadeAnimation = undefined;
+  if (finishing || video.paused || video.ended) {
+    return;
+  }
+
+  if (Number.isFinite(video.duration) && video.duration > 0) {
+    const remainingMs = Math.max(0, (video.duration - video.currentTime) * 1_000);
+    video.volume = Math.min(1, remainingMs / CINEMATIC_AUDIO_FADE_OUT_MS);
+  }
+
+  audioFadeAnimation = requestAnimationFrame(updateTerminalAudioFade);
+}
+
+function startTerminalAudioFade(): void {
+  clearTerminalAudioFade();
+  video.volume = 1;
+  audioFadeAnimation = requestAnimationFrame(updateTerminalAudioFade);
+}
+
 function releaseMedia(): void {
   clearWatchdog();
+  clearTerminalAudioFade();
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -281,8 +311,9 @@ async function startPlayback(startAtLocal: number): Promise<void> {
     { once: true },
   );
 
-  // Reprodução audível: sem muted e sem manipulação de volume. A chamada única
-  // de play() inicia o vídeo MP4 e sua faixa AAC integrada em conjunto.
+  // A chamada única de play() inicia o vídeo MP4 e sua faixa AAC integrada em conjunto.
+  // Apenas os 120 ms finais têm o ganho reduzido para evitar o corte terminal.
+  video.volume = 1;
   const playPromise = video.play();
   layer.classList.add("visible");
 
@@ -292,6 +323,8 @@ async function startPlayback(startAtLocal: number): Promise<void> {
     await closeWithError("PLAY", error);
     return;
   }
+
+  startTerminalAudioFade();
 
   diagnostics = {
     ...diagnostics,
@@ -334,6 +367,8 @@ async function initialize(): Promise<void> {
   }
 
   video.addEventListener("ended", () => {
+    clearTerminalAudioFade();
+    video.volume = 0;
     void finishNormally().catch((error: unknown) => {
       console.error("[cinematic-sync] Falha no encerramento normal.", error);
     });
