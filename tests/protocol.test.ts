@@ -51,6 +51,16 @@ describe("broadcast protocol", () => {
       issuedAt: 9_001,
       action: { type: "PLAY_EMF", emfId: "emf-1" },
     });
+    const volumeControl = protocolMessage<MusicControlMessage>({
+      kind: "MUSIC_CONTROL",
+      requestId: "volume-control-1",
+      issuedAt: 9_002,
+      action: {
+        type: "SET_VOLUMES",
+        musicVolume: 0.5,
+        effectsVolume: 0.25,
+      },
+    });
     const snapshot = protocolMessage<MusicStateMessage>({
       kind: "MUSIC_STATE",
       issuedAt: 10_001,
@@ -64,6 +74,7 @@ describe("broadcast protocol", () => {
 
     expect(isProtocolMessage(control)).toBe(true);
     expect(isProtocolMessage(emfControl)).toBe(true);
+    expect(isProtocolMessage(volumeControl)).toBe(true);
     expect(isProtocolMessage(snapshot)).toBe(true);
     expect(isProtocolMessage(request)).toBe(true);
   });
@@ -113,6 +124,19 @@ describe("broadcast protocol", () => {
         requestId: "request-1",
         issuedAt: 1_000,
         action: { type: "PLAY_EMF", emfId: "emf-4" },
+      }),
+    ).toBe(false);
+    expect(
+      isProtocolMessage({
+        version: PROTOCOL_VERSION,
+        kind: "MUSIC_CONTROL",
+        requestId: "request-1",
+        issuedAt: 1_000,
+        action: {
+          type: "SET_VOLUMES",
+          musicVolume: 1.1,
+          effectsVolume: 0.5,
+        },
       }),
     ).toBe(false);
   });

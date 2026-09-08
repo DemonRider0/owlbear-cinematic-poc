@@ -1,4 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  BROADCAST_CHANNEL,
+  MUSIC_ROOM_METADATA_KEY,
+  PROTOCOL_VERSION,
+} from "../src/config";
+
+interface BroadcastEvent {
+  connectionId: string;
+  data: unknown;
+}
 
 const sdk = vi.hoisted(() => ({
   onReady: vi.fn(),
@@ -6,6 +16,7 @@ const sdk = vi.hoisted(() => ({
   createTool: vi.fn(),
   setMetadata: vi.fn(),
   readyCallback: undefined as (() => void) | undefined,
+  messageCallback: undefined as ((event: BroadcastEvent) => void) | undefined,
 }));
 
 const media = vi.hoisted(() => ({
@@ -29,7 +40,11 @@ vi.mock("@owlbear-rodeo/sdk", () => ({
       onChange: vi.fn(),
     },
     broadcast: {
-      onMessage: vi.fn(),
+      onMessage: vi.fn(
+        (_channel: string, callback: (event: BroadcastEvent) => void) => {
+          sdk.messageCallback = callback;
+        },
+      ),
       sendMessage: sdk.sendMessage,
     },
     room: {
@@ -80,6 +95,7 @@ describe("background startup", () => {
     vi.resetModules();
     vi.clearAllMocks();
     sdk.readyCallback = undefined;
+    sdk.messageCallback = undefined;
     sdk.sendMessage.mockResolvedValue(undefined);
     sdk.createTool.mockResolvedValue(undefined);
     sdk.setMetadata.mockResolvedValue(undefined);
@@ -124,5 +140,64 @@ describe("background startup", () => {
         String(message).includes("Inicialização do background falhou"),
       ),
     ).toBe(false);
+  });
+
+  it("persists and broadcasts independent volume updates in the shared music state", async () => {
+    media.preloadCinematic.mockResolvedValue({
+      bytes: 10_199_007,
+      readyState: 3,
+    });
+    await startBackground();
+
+    const initialMetadata = sdk.setMetadata.mock.calls.at(-1)?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    const initialState = initialMetadata?.[MUSIC_ROOM_METADATA_KEY] as
+      | { stateId?: string }
+      | undefined;
+    sdk.setMetadata.mockClear();
+    sdk.sendMessage.mockClear();
+
+    sdk.messageCallback?.({
+      connectionId: "gm-connection",
+      data: {
+        version: PROTOCOL_VERSION,
+        kind: "MUSIC_CONTROL",
+        requestId: "volume-control",
+        issuedAt: Date.now(),
+        action: {
+          type: "SET_VOLUMES",
+          musicVolume: 0.5,
+          effectsVolume: 0.25,
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(sdk.setMetadata).toHaveBeenCalledOnce());
+    const metadata = sdk.setMetadata.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    const state = metadata[MUSIC_ROOM_METADATA_KEY] as {
+      stateId: string;
+      musicVolume: number;
+      effectsVolume: number;
+    };
+    expect(state.stateId).toBe(initialState?.stateId);
+    expect(state.musicVolume).toBe(0.5);
+    expect(state.effectsVolume).toBe(0.25);
+    await vi.waitFor(() =>
+      expect(sdk.sendMessage).toHaveBeenCalledWith(
+        BROADCAST_CHANNEL,
+        expect.objectContaining({
+          kind: "MUSIC_STATE",
+          state: expect.objectContaining({
+            musicVolume: 0.5,
+            effectsVolume: 0.25,
+          }),
+        }),
+        { destination: "ALL" },
+      ),
+    );
   });
 });

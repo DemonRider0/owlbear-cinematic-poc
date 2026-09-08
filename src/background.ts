@@ -23,6 +23,7 @@ import {
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
+  createVolumeMusicState,
   isCinematicMusicLocked,
   isMusicState,
   type MusicState,
@@ -536,6 +537,17 @@ async function handleMusicControl(
     return;
   }
   const issuedAtGm = Date.now();
+  if (message.action.type === "SET_VOLUMES") {
+    const next = createVolumeMusicState(
+      musicState,
+      message.action.musicVolume,
+      message.action.effectsVolume,
+      identity.connectionId,
+      issuedAtGm,
+    );
+    await publishMusicState(next, message.requestId);
+    return;
+  }
   if (isCinematicMusicLocked(musicState, issuedAtGm)) {
     await broadcastMusicState(musicState, message.requestId, senderConnectionId);
     return;

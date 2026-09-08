@@ -15,6 +15,8 @@ import {
 import {
   compareMusicStates,
   createCinematicMusicState,
+  getEffectsVolume,
+  getMusicVolume,
   isCinematicMusicLocked,
   isEmfActive,
   musicPositionAtGm,
@@ -46,6 +48,8 @@ interface StoredStatus {
   diagnostics: ClientDiagnostics;
 }
 
+const VOLUME_BROADCAST_DEBOUNCE_MS = 120;
+
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
   if (!element) {
@@ -69,10 +73,18 @@ const musicCurrentTime = requiredElement<HTMLElement>("#music-current-time");
 const musicProgress = requiredElement<HTMLInputElement>("#music-progress");
 const musicDuration = requiredElement<HTMLElement>("#music-duration");
 const musicStatus = requiredElement<HTMLElement>("#music-status");
+const musicVolumeInput = requiredElement<HTMLInputElement>("#music-volume");
+const musicVolumeValue = requiredElement<HTMLOutputElement>(
+  "#music-volume-value",
+);
 const musicTrackButtons = [
   ...document.querySelectorAll<HTMLButtonElement>("[data-track-id]"),
 ];
 const emfStatus = requiredElement<HTMLElement>("#emf-status");
+const effectsVolumeInput = requiredElement<HTMLInputElement>("#effects-volume");
+const effectsVolumeValue = requiredElement<HTMLOutputElement>(
+  "#effects-volume-value",
+);
 const emfButtons = [
   ...document.querySelectorAll<HTMLButtonElement>("[data-emf-id]"),
 ];
@@ -87,6 +99,10 @@ let musicState: MusicState | undefined;
 let sendingMusicCommand = false;
 let seekingMusic = false;
 let clientsReadyForMusic = false;
+let musicVolumeDraft = 1;
+let effectsVolumeDraft = 1;
+let volumeControlsDirty = false;
+let volumeBroadcastTimer: number | undefined;
 
 function mergeDiagnostics(
   current: ClientDiagnostics | undefined,
@@ -185,18 +201,82 @@ function formatTime(seconds: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+function volumeFromInput(input: HTMLInputElement): number {
+  return Math.min(1, Math.max(0, Number(input.value) / 100));
+}
+
+function setVolumeControlValues(): void {
+  musicVolumeInput.value = String(Math.round(musicVolumeDraft * 100));
+  effectsVolumeInput.value = String(Math.round(effectsVolumeDraft * 100));
+  musicVolumeValue.textContent = `${musicVolumeInput.value}%`;
+  effectsVolumeValue.textContent = `${effectsVolumeInput.value}%`;
+}
+
+function renderVolumeControls(): void {
+  const state = musicState;
+  musicVolumeInput.disabled = state === undefined;
+  effectsVolumeInput.disabled = state === undefined;
+  if (state && !volumeControlsDirty) {
+    musicVolumeDraft = getMusicVolume(state);
+    effectsVolumeDraft = getEffectsVolume(state);
+  }
+  setVolumeControlValues();
+}
+
+function scheduleVolumeBroadcast(delayMs = VOLUME_BROADCAST_DEBOUNCE_MS): void {
+  if (volumeBroadcastTimer !== undefined) {
+    window.clearTimeout(volumeBroadcastTimer);
+  }
+  volumeBroadcastTimer = window.setTimeout(() => {
+    volumeBroadcastTimer = undefined;
+    void flushVolumeBroadcast().catch((error: unknown) => {
+      console.error("[cinematic-sync] Falha ao ajustar volumes.", error);
+    });
+  }, delayMs);
+}
+
+async function flushVolumeBroadcast(): Promise<void> {
+  if (!volumeControlsDirty || !musicState || sendingMusicCommand) {
+    return;
+  }
+  if (
+    getMusicVolume(musicState) === musicVolumeDraft &&
+    getEffectsVolume(musicState) === effectsVolumeDraft
+  ) {
+    volumeControlsDirty = false;
+    renderVolumeControls();
+    return;
+  }
+  await sendMusicControl({
+    type: "SET_VOLUMES",
+    musicVolume: musicVolumeDraft,
+    effectsVolume: effectsVolumeDraft,
+  });
+}
+
 function receiveMusicState(candidate: MusicState): void {
   if (musicState && compareMusicStates(candidate, musicState) <= 0) {
     return;
   }
   musicState = candidate;
   sendingMusicCommand = false;
+  if (volumeControlsDirty) {
+    if (
+      getMusicVolume(candidate) === musicVolumeDraft &&
+      getEffectsVolume(candidate) === effectsVolumeDraft
+    ) {
+      volumeControlsDirty = false;
+    } else {
+      scheduleVolumeBroadcast();
+    }
+  }
   renderMusic();
   render();
 }
 
 function renderMusic(): void {
   const state = musicState;
+  renderVolumeControls();
   const disabled =
     state === undefined ||
     sendingMusicCommand ||
@@ -415,11 +495,13 @@ async function requestMusicState(): Promise<void> {
 }
 
 async function sendMusicControl(action: MusicControlAction): Promise<void> {
+  const volumeOnly = action.type === "SET_VOLUMES";
   if (
     !musicState ||
     sendingMusicCommand ||
-    !clientsReadyForMusic ||
-    isCinematicMusicLocked(musicState, Date.now()) ||
+    (!volumeOnly &&
+      (!clientsReadyForMusic ||
+        isCinematicMusicLocked(musicState, Date.now()))) ||
     (await OBR.player.getRole()) !== "GM"
   ) {
     return;
@@ -438,6 +520,9 @@ async function sendMusicControl(action: MusicControlAction): Promise<void> {
     });
   } catch (error) {
     sendingMusicCommand = false;
+    if (volumeOnly) {
+      volumeControlsDirty = false;
+    }
     renderMusic();
     throw error;
   }
@@ -489,6 +574,8 @@ async function dispatchPlay(): Promise<void> {
         (musicState?.revision ?? 0) + 1,
         issuedAt,
         startAtGm,
+        musicVolumeDraft,
+        effectsVolumeDraft,
       ),
     });
     activePlayRequestId = message.requestId;
@@ -592,6 +679,25 @@ async function initialize(): Promise<void> {
         console.error("[cinematic-sync] Falha no seek musical.", error);
       },
     );
+  });
+  const updateVolumeDrafts = (delayMs?: number): void => {
+    musicVolumeDraft = volumeFromInput(musicVolumeInput);
+    effectsVolumeDraft = volumeFromInput(effectsVolumeInput);
+    volumeControlsDirty = true;
+    setVolumeControlValues();
+    scheduleVolumeBroadcast(delayMs);
+  };
+  musicVolumeInput.addEventListener("input", () => {
+    updateVolumeDrafts();
+  });
+  effectsVolumeInput.addEventListener("input", () => {
+    updateVolumeDrafts();
+  });
+  musicVolumeInput.addEventListener("change", () => {
+    updateVolumeDrafts(0);
+  });
+  effectsVolumeInput.addEventListener("change", () => {
+    updateVolumeDrafts(0);
   });
   for (const button of musicTrackButtons) {
     button.addEventListener("click", () => {

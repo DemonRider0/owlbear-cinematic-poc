@@ -14,6 +14,9 @@ import {
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
+  createVolumeMusicState,
+  getEffectsVolume,
+  getMusicVolume,
   isMusicState,
   isEmfActive,
   musicGainAtGm,
@@ -22,6 +25,56 @@ import {
 } from "../src/music-state";
 
 describe("music state anchors", () => {
+  it("defaults legacy states to full independent player volumes", () => {
+    const current = createInitialMusicState("gm-1", "initial", 1_000);
+    const legacyState = { ...current };
+    delete legacyState.musicVolume;
+    delete legacyState.effectsVolume;
+
+    expect(isMusicState(legacyState)).toBe(true);
+    expect(getMusicVolume(legacyState)).toBe(1);
+    expect(getEffectsVolume(legacyState)).toBe(1);
+  });
+
+  it("updates player volumes without changing the playback identity or anchor", () => {
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const playing = createManualMusicState(
+      initial,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_500,
+    );
+    const adjusted = createVolumeMusicState(
+      playing,
+      0.5,
+      0.25,
+      "gm-1",
+      2_000,
+    );
+
+    expect(adjusted.stateId).toBe(playing.stateId);
+    expect(adjusted.revision).toBe(playing.revision + 1);
+    expect(adjusted.playing).toBe(true);
+    expect(adjusted.positionSeconds).toBe(playing.positionSeconds);
+    expect(adjusted.anchorAtGm).toBe(playing.anchorAtGm);
+    expect(getMusicVolume(adjusted)).toBe(0.5);
+    expect(getEffectsVolume(adjusted)).toBe(0.25);
+    expect(isMusicState(adjusted)).toBe(true);
+
+    const emf = createEmfMusicState(
+      adjusted,
+      "emf-1",
+      "gm-1",
+      "emf",
+      2_500,
+      3_000,
+    );
+    expect(getMusicVolume(emf)).toBe(0.5);
+    expect(getEffectsVolume(emf)).toBe(0.25);
+  });
+
   it("derives playback position without periodic broadcasts", () => {
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
     const playing = createManualMusicState(

@@ -68,6 +68,8 @@ export interface MusicState {
   playing: boolean;
   positionSeconds: number;
   anchorAtGm: number;
+  musicVolume?: number;
+  effectsVolume?: number;
   gainTransition?: MusicGainTransition;
   transition?: MusicTransition;
   cinematic?: CinematicMusicHandoff;
@@ -82,7 +84,8 @@ export type ManualMusicControlAction =
 
 export type MusicControlAction =
   | ManualMusicControlAction
-  | { type: "PLAY_EMF"; emfId: EmfId };
+  | { type: "PLAY_EMF"; emfId: EmfId }
+  | { type: "SET_VOLUMES"; musicVolume: number; effectsVolume: number };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -94,6 +97,32 @@ function isFiniteNumber(value: unknown): value is number {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function clampVolume(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function isNormalizedVolume(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0 && value <= 1;
+}
+
+export function getMusicVolume(state: MusicState): number {
+  return state.musicVolume ?? 1;
+}
+
+export function getEffectsVolume(state: MusicState): number {
+  return state.effectsVolume ?? 1;
+}
+
+function playerVolumes(state: MusicState): Pick<
+  MusicState,
+  "musicVolume" | "effectsVolume"
+> {
+  return {
+    musicVolume: getMusicVolume(state),
+    effectsVolume: getEffectsVolume(state),
+  };
 }
 
 export function isMusicTrackId(value: unknown): value is MusicTrackId {
@@ -218,6 +247,25 @@ export function createInitialMusicState(
     playing: false,
     positionSeconds: 0,
     anchorAtGm: nowGm,
+    musicVolume: 1,
+    effectsVolume: 1,
+  };
+}
+
+export function createVolumeMusicState(
+  current: MusicState,
+  musicVolume: number,
+  effectsVolume: number,
+  authorityConnectionId: string,
+  issuedAtGm: number,
+): MusicState {
+  return {
+    ...current,
+    revision: current.revision + 1,
+    authorityConnectionId,
+    updatedAtGm: Math.max(issuedAtGm, current.updatedAtGm + 1),
+    musicVolume: clampVolume(musicVolume),
+    effectsVolume: clampVolume(effectsVolume),
   };
 }
 
@@ -241,6 +289,7 @@ export function createManualMusicState(
     playing: current.playing,
     positionSeconds: currentPosition,
     anchorAtGm: applyAtGm,
+    ...playerVolumes(current),
     gainTransition: current.gainTransition,
   };
 
@@ -298,6 +347,7 @@ export function createEmfMusicState(
     playing: false,
     positionSeconds: musicPositionAtGm(current, applyAtGm),
     anchorAtGm: applyAtGm,
+    ...playerVolumes(current),
     emf: {
       id: emfId,
       startAtGm: applyAtGm,
@@ -312,6 +362,8 @@ export function createCinematicMusicState(
   revision: number,
   issuedAtGm: number,
   videoStartAtGm: number,
+  musicVolume = 1,
+  effectsVolume = 1,
 ): MusicState {
   const videoEndsAtGm =
     videoStartAtGm + CINEMATIC_MUSIC_SYNC.videoDurationSeconds * 1_000;
@@ -326,6 +378,8 @@ export function createCinematicMusicState(
     playing: true,
     positionSeconds: CINEMATIC_MUSIC_SYNC.playerPositionAtVideoStartSeconds,
     anchorAtGm: videoStartAtGm,
+    musicVolume: clampVolume(musicVolume),
+    effectsVolume: clampVolume(effectsVolume),
     gainTransition: {
       startAtGm:
         videoEndsAtGm - CINEMATIC_OUTRO_MUSIC.terminalGainRampMs,
@@ -394,6 +448,7 @@ export function createPostCinematicMusicState(
         (handoff.videoEndsAtGm - outro.startAtGm) / 1_000,
     ),
     anchorAtGm: handoff.videoEndsAtGm,
+    ...playerVolumes(current),
     gainTransition:
       closingGain < 1 && (outro.normalizationMs ?? 0) > 0
         ? {
@@ -448,6 +503,7 @@ export function createAuthorityTakeoverMusicState(
           Math.max(0, previousAuthorityNowGm - outro.startAtGm) / 1_000,
       ),
       anchorAtGm: newAuthorityNowGm,
+      ...playerVolumes(current),
       gainTransition:
         targetGain < 1 &&
         normalizationMs > 0 &&
@@ -469,6 +525,7 @@ export function createAuthorityTakeoverMusicState(
     revision: nextRevision,
     authorityConnectionId,
     updatedAtGm,
+    ...playerVolumes(current),
     anchorAtGm: current.anchorAtGm + clockDeltaMs,
     gainTransition: current.gainTransition
       ? {
@@ -532,6 +589,11 @@ export function isMusicControlAction(value: unknown): value is MusicControlActio
       return isMusicTrackId(value.trackId);
     case "PLAY_EMF":
       return isEmfId(value.emfId);
+    case "SET_VOLUMES":
+      return (
+        isNormalizedVolume(value.musicVolume) &&
+        isNormalizedVolume(value.effectsVolume)
+      );
     default:
       return false;
   }
@@ -676,6 +738,15 @@ export function isMusicState(value: unknown): value is MusicState {
     !isFiniteNumber(value.positionSeconds) ||
     value.positionSeconds < 0 ||
     !isFiniteNumber(value.anchorAtGm)
+  ) {
+    return false;
+  }
+
+  if (
+    (value.musicVolume !== undefined &&
+      !isNormalizedVolume(value.musicVolume)) ||
+    (value.effectsVolume !== undefined &&
+      !isNormalizedVolume(value.effectsVolume))
   ) {
     return false;
   }

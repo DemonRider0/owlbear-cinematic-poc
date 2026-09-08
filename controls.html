@@ -41,6 +41,20 @@
           <button type="button" data-track-id="o-porao" disabled>O Porão</button>
           <button type="button" data-track-id="o-idolo" disabled>O Ídolo</button>
         </div>
+        <div class="volume-control">
+          <label for="music-volume">Volume</label>
+          <input
+            id="music-volume"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value="100"
+            aria-label="Volume das Trilhas"
+            disabled
+          />
+          <output id="music-volume-value" for="music-volume">100%</output>
+        </div>
         <p id="music-status" class="secondary">Aguardando estado sincronizado…</p>
       </section>
 
@@ -50,6 +64,20 @@
           <button type="button" data-emf-id="emf-1" disabled>EMF 1</button>
           <button type="button" data-emf-id="emf-2" disabled>EMF 2</button>
           <button type="button" data-emf-id="emf-3" disabled>EMF 3</button>
+        </div>
+        <div class="volume-control">
+          <label for="effects-volume">Volume</label>
+          <input
+            id="effects-volume"
+            type="range"
+            min="0"
+            max="100"
+            step="1"
+            value="100"
+            aria-label="Volume dos Efeitos"
+            disabled
+          />
+          <output id="effects-volume-value" for="effects-volume">100%</output>
         </div>
         <p id="emf-status" class="secondary">Aguardando estado sincronizado…</p>
       </section>

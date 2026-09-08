@@ -121,6 +121,32 @@ section {
   background: #34475f;
 }
 
+.volume-control {
+  display: grid;
+  grid-template-columns: 48px 1fr 38px;
+  gap: 8px;
+  align-items: center;
+  margin-top: 9px;
+  color: #d6d8dc;
+  font-size: 12px;
+}
+
+.volume-control input {
+  width: 100%;
+  margin: 0;
+  accent-color: #8ab4f8;
+  cursor: pointer;
+}
+
+.volume-control input:disabled {
+  cursor: not-allowed;
+}
+
+.volume-control output {
+  font: 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align: right;
+}
+
 #emf-status {
   min-height: 15px;
   margin-top: 8px;
