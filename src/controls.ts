@@ -2,7 +2,6 @@ import OBR, { type Player } from "@owlbear-rodeo/sdk";
 import {
   BROADCAST_CHANNEL,
   CINEMATIC_MUSIC_SYNC,
-  CONTROL_POPOVER_ID,
   EMFS,
   MUSIC_TRACK_CROSSFADE_MS,
   MUSIC_TRACKS,
@@ -15,8 +14,6 @@ import {
 import {
   compareMusicStates,
   createCinematicMusicState,
-  getEffectsVolume,
-  getMusicVolume,
   isCinematicMusicLocked,
   isEmfActive,
   musicPositionAtGm,
@@ -34,6 +31,14 @@ import {
   type PlayMessage,
 } from "./protocol";
 import { isReadyForPlayback } from "./state-machine";
+import {
+  clampLocalVolume,
+  loadLocalAudioVolumes,
+  localAudioStorageKey,
+  parseLocalAudioVolumes,
+  saveLocalAudioVolumes,
+  type LocalAudioVolumes,
+} from "./local-audio-settings";
 
 interface Participant {
   connectionId: string;
@@ -47,8 +52,6 @@ interface StoredStatus {
   reportedAt: number;
   diagnostics: ClientDiagnostics;
 }
-
-const VOLUME_BROADCAST_DEBOUNCE_MS = 120;
 
 function requiredElement<T extends Element>(selector: string): T {
   const element = document.querySelector<T>(selector);
@@ -67,6 +70,8 @@ const playButton = requiredElement<HTMLButtonElement>("#play-button");
 const diagnosticsField = requiredElement<HTMLTextAreaElement>("#diagnostics");
 const copyButton = requiredElement<HTMLButtonElement>("#copy-diagnostics");
 const copyResult = requiredElement<HTMLElement>("#copy-result");
+const panelTitle = requiredElement<HTMLElement>("h1");
+const musicHeading = requiredElement<HTMLElement>("#music-heading");
 const musicCurrent = requiredElement<HTMLElement>("#music-current");
 const musicToggle = requiredElement<HTMLButtonElement>("#music-toggle");
 const musicCurrentTime = requiredElement<HTMLElement>("#music-current-time");
@@ -81,6 +86,7 @@ const musicTrackButtons = [
   ...document.querySelectorAll<HTMLButtonElement>("[data-track-id]"),
 ];
 const emfStatus = requiredElement<HTMLElement>("#emf-status");
+const emfHeading = requiredElement<HTMLElement>("#emf-heading");
 const effectsVolumeInput = requiredElement<HTMLInputElement>("#effects-volume");
 const effectsVolumeValue = requiredElement<HTMLOutputElement>(
   "#effects-volume-value",
@@ -99,10 +105,11 @@ let musicState: MusicState | undefined;
 let sendingMusicCommand = false;
 let seekingMusic = false;
 let clientsReadyForMusic = false;
-let musicVolumeDraft = 1;
-let effectsVolumeDraft = 1;
-let volumeControlsDirty = false;
-let volumeBroadcastTimer: number | undefined;
+let localPlayerId = "";
+let localVolumes: LocalAudioVolumes = {
+  musicVolume: 1,
+  effectsVolume: 1,
+};
 
 function mergeDiagnostics(
   current: ClientDiagnostics | undefined,
@@ -201,57 +208,74 @@ function formatTime(seconds: number): string {
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
-function volumeFromInput(input: HTMLInputElement): number {
-  return Math.min(1, Math.max(0, Number(input.value) / 100));
-}
-
 function setVolumeControlValues(): void {
-  musicVolumeInput.value = String(Math.round(musicVolumeDraft * 100));
-  effectsVolumeInput.value = String(Math.round(effectsVolumeDraft * 100));
+  musicVolumeInput.value = String(Math.round(localVolumes.musicVolume * 100));
+  effectsVolumeInput.value = String(
+    Math.round(localVolumes.effectsVolume * 100),
+  );
   musicVolumeValue.textContent = `${musicVolumeInput.value}%`;
   effectsVolumeValue.textContent = `${effectsVolumeInput.value}%`;
 }
 
-function renderVolumeControls(): void {
-  const state = musicState;
-  musicVolumeInput.disabled = state === undefined;
-  effectsVolumeInput.disabled = state === undefined;
-  if (state && !volumeControlsDirty) {
-    musicVolumeDraft = getMusicVolume(state);
-    effectsVolumeDraft = getEffectsVolume(state);
+function persistLocalVolumes(): void {
+  try {
+    localVolumes = saveLocalAudioVolumes(
+      localStorage,
+      localPlayerId,
+      localVolumes,
+    );
+  } catch (error) {
+    console.warn(
+      "[cinematic-sync] Não foi possível persistir os volumes locais.",
+      error,
+    );
   }
+}
+
+function updateLocalVolume(kind: "music" | "effects"): void {
+  if (kind === "music") {
+    localVolumes.musicVolume = clampLocalVolume(
+      Number(musicVolumeInput.value) / 100,
+    );
+    musicVolumeValue.textContent = `${musicVolumeInput.value}%`;
+  } else {
+    localVolumes.effectsVolume = clampLocalVolume(
+      Number(effectsVolumeInput.value) / 100,
+    );
+    effectsVolumeValue.textContent = `${effectsVolumeInput.value}%`;
+  }
+  persistLocalVolumes();
+}
+
+function initializeLocalVolumeControls(playerId: string): void {
+  localPlayerId = playerId;
+  localVolumes = loadLocalAudioVolumes(localStorage, playerId);
   setVolumeControlValues();
-}
-
-function scheduleVolumeBroadcast(delayMs = VOLUME_BROADCAST_DEBOUNCE_MS): void {
-  if (volumeBroadcastTimer !== undefined) {
-    window.clearTimeout(volumeBroadcastTimer);
-  }
-  volumeBroadcastTimer = window.setTimeout(() => {
-    volumeBroadcastTimer = undefined;
-    void flushVolumeBroadcast().catch((error: unknown) => {
-      console.error("[cinematic-sync] Falha ao ajustar volumes.", error);
-    });
-  }, delayMs);
-}
-
-async function flushVolumeBroadcast(): Promise<void> {
-  if (!volumeControlsDirty || !musicState || sendingMusicCommand) {
-    return;
-  }
-  if (
-    getMusicVolume(musicState) === musicVolumeDraft &&
-    getEffectsVolume(musicState) === effectsVolumeDraft
-  ) {
-    volumeControlsDirty = false;
-    renderVolumeControls();
-    return;
-  }
-  await sendMusicControl({
-    type: "SET_VOLUMES",
-    musicVolume: musicVolumeDraft,
-    effectsVolume: effectsVolumeDraft,
+  musicVolumeInput.disabled = false;
+  effectsVolumeInput.disabled = false;
+  musicVolumeInput.addEventListener("input", () => {
+    updateLocalVolume("music");
   });
+  effectsVolumeInput.addEventListener("input", () => {
+    updateLocalVolume("effects");
+  });
+  const storageKey = localAudioStorageKey(playerId);
+  window.addEventListener("storage", (event) => {
+    if (event.key === storageKey) {
+      localVolumes = parseLocalAudioVolumes(event.newValue);
+      setVolumeControlValues();
+    }
+  });
+}
+
+function configurePlayerPanel(): void {
+  for (const element of document.querySelectorAll<HTMLElement>("[data-gm-only]")) {
+    element.remove();
+  }
+  panelTitle.textContent = "Volumes de áudio";
+  musicHeading.textContent = "Volume das Trilhas";
+  emfHeading.textContent = "Volume dos Efeitos";
+  document.body.classList.add("player-panel");
 }
 
 function receiveMusicState(candidate: MusicState): void {
@@ -260,23 +284,12 @@ function receiveMusicState(candidate: MusicState): void {
   }
   musicState = candidate;
   sendingMusicCommand = false;
-  if (volumeControlsDirty) {
-    if (
-      getMusicVolume(candidate) === musicVolumeDraft &&
-      getEffectsVolume(candidate) === effectsVolumeDraft
-    ) {
-      volumeControlsDirty = false;
-    } else {
-      scheduleVolumeBroadcast();
-    }
-  }
   renderMusic();
   render();
 }
 
 function renderMusic(): void {
   const state = musicState;
-  renderVolumeControls();
   const disabled =
     state === undefined ||
     sendingMusicCommand ||
@@ -451,7 +464,7 @@ async function refreshParticipants(updatedPlayers?: Player[]): Promise<void> {
   ]);
 
   if (role !== "GM") {
-    await lockOutNonGm();
+    configurePlayerPanel();
     return;
   }
 
@@ -495,13 +508,11 @@ async function requestMusicState(): Promise<void> {
 }
 
 async function sendMusicControl(action: MusicControlAction): Promise<void> {
-  const volumeOnly = action.type === "SET_VOLUMES";
   if (
     !musicState ||
     sendingMusicCommand ||
-    (!volumeOnly &&
-      (!clientsReadyForMusic ||
-        isCinematicMusicLocked(musicState, Date.now()))) ||
+    !clientsReadyForMusic ||
+    isCinematicMusicLocked(musicState, Date.now()) ||
     (await OBR.player.getRole()) !== "GM"
   ) {
     return;
@@ -520,22 +531,8 @@ async function sendMusicControl(action: MusicControlAction): Promise<void> {
     });
   } catch (error) {
     sendingMusicCommand = false;
-    if (volumeOnly) {
-      volumeControlsDirty = false;
-    }
     renderMusic();
     throw error;
-  }
-}
-
-async function lockOutNonGm(): Promise<void> {
-  document.body.classList.remove("booting");
-  document.body.classList.add("unauthorized");
-  document.querySelector("#controls")?.remove();
-  try {
-    await OBR.popover.close(CONTROL_POPOVER_ID);
-  } catch (error) {
-    console.warn("[cinematic-sync] Não foi possível fechar o painel não autorizado.", error);
   }
 }
 
@@ -574,8 +571,6 @@ async function dispatchPlay(): Promise<void> {
         (musicState?.revision ?? 0) + 1,
         issuedAt,
         startAtGm,
-        musicVolumeDraft,
-        effectsVolumeDraft,
       ),
     });
     activePlayRequestId = message.requestId;
@@ -603,16 +598,19 @@ async function copyDiagnostics(): Promise<void> {
 }
 
 async function initialize(): Promise<void> {
-  const [connectionId, name, role] = await Promise.all([
+  const [connectionId, playerId, name, role] = await Promise.all([
     OBR.player.getConnectionId(),
+    OBR.player.getId(),
     OBR.player.getName(),
     OBR.player.getRole(),
   ]);
   localConnectionId = connectionId;
   localName = name;
+  initializeLocalVolumeControls(playerId);
 
   if (role !== "GM") {
-    await lockOutNonGm();
+    configurePlayerPanel();
+    document.body.classList.remove("booting");
     return;
   }
 
@@ -648,7 +646,7 @@ async function initialize(): Promise<void> {
   });
   OBR.player.onChange((player) => {
     if (player.role !== "GM") {
-      void lockOutNonGm();
+      configurePlayerPanel();
     }
   });
   playButton.addEventListener("click", () => {
@@ -679,25 +677,6 @@ async function initialize(): Promise<void> {
         console.error("[cinematic-sync] Falha no seek musical.", error);
       },
     );
-  });
-  const updateVolumeDrafts = (delayMs?: number): void => {
-    musicVolumeDraft = volumeFromInput(musicVolumeInput);
-    effectsVolumeDraft = volumeFromInput(effectsVolumeInput);
-    volumeControlsDirty = true;
-    setVolumeControlValues();
-    scheduleVolumeBroadcast(delayMs);
-  };
-  musicVolumeInput.addEventListener("input", () => {
-    updateVolumeDrafts();
-  });
-  effectsVolumeInput.addEventListener("input", () => {
-    updateVolumeDrafts();
-  });
-  musicVolumeInput.addEventListener("change", () => {
-    updateVolumeDrafts(0);
-  });
-  effectsVolumeInput.addEventListener("change", () => {
-    updateVolumeDrafts(0);
   });
   for (const button of musicTrackButtons) {
     button.addEventListener("click", () => {

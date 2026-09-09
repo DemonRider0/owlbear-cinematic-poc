@@ -17,15 +17,20 @@ import { toSerializableError } from "./errors";
 import { preloadCinematic } from "./media-cache";
 import { MusicPlayer } from "./music-player";
 import {
+  loadLocalAudioVolumes,
+  localAudioStorageKey,
+  parseLocalAudioVolumes,
+} from "./local-audio-settings";
+import {
   compareMusicStates,
   createAuthorityTakeoverMusicState,
   createEmfMusicState,
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
-  createVolumeMusicState,
   isCinematicMusicLocked,
   isMusicState,
+  stripLegacyVolumeFields,
   type MusicState,
 } from "./music-state";
 import {
@@ -135,28 +140,25 @@ async function isGmConnection(connectionId: string): Promise<boolean> {
   return (await roleForConnection(connectionId)) === "GM";
 }
 
-async function syncGmTool(role: "GM" | "PLAYER"): Promise<void> {
-  if (role === "GM" && !toolRegistered) {
+async function syncTool(): Promise<void> {
+  if (!toolRegistered) {
     await OBR.tool.create({
       id: TOOL_ID,
       icons: [
         {
           icon: resolveAppUrl("./icon.svg"),
           label: "Cinemática",
-          filter: { roles: ["GM"] },
+          filter: { roles: ["GM", "PLAYER"] },
         },
       ],
       async onClick(_context, elementId) {
-        if ((await OBR.player.getRole()) !== "GM") {
-          console.warn("[cinematic-sync] Abertura do painel ignorada: cliente não é GM.");
-          return false;
-        }
+        const role = await OBR.player.getRole();
 
         await OBR.popover.open({
           id: CONTROL_POPOVER_ID,
           url: resolveAppUrl("./controls.html"),
           width: 380,
-          height: 720,
+          height: role === "GM" ? 720 : 260,
           anchorElementId: elementId,
           anchorOrigin: { horizontal: "LEFT", vertical: "CENTER" },
           transformOrigin: { horizontal: "RIGHT", vertical: "CENTER" },
@@ -165,12 +167,6 @@ async function syncGmTool(role: "GM" | "PLAYER"): Promise<void> {
       },
     });
     toolRegistered = true;
-    return;
-  }
-
-  if (role !== "GM" && toolRegistered) {
-    await OBR.tool.remove(TOOL_ID);
-    toolRegistered = false;
   }
 }
 
@@ -359,14 +355,15 @@ async function acceptMusicState(
   ) {
     return false;
   }
-  if (musicState && compareMusicStates(candidate, musicState) <= 0) {
+  const sanitizedCandidate = stripLegacyVolumeFields(candidate);
+  if (musicState && compareMusicStates(sanitizedCandidate, musicState) <= 0) {
     return false;
   }
 
-  musicState = candidate;
-  beginClockSyncIfNeeded(candidate.authorityConnectionId);
+  musicState = sanitizedCandidate;
+  beginClockSyncIfNeeded(sanitizedCandidate.authorityConnectionId);
   applyMusicStateIfClockReady();
-  scheduleCinematicMusicCompletion(candidate);
+  scheduleCinematicMusicCompletion(sanitizedCandidate);
   return true;
 }
 
@@ -377,7 +374,9 @@ async function persistMusicState(state: MusicState): Promise<void> {
   ) {
     return;
   }
-  await OBR.room.setMetadata({ [MUSIC_ROOM_METADATA_KEY]: state });
+  await OBR.room.setMetadata({
+    [MUSIC_ROOM_METADATA_KEY]: stripLegacyVolumeFields(state),
+  });
 }
 
 async function broadcastMusicState(
@@ -385,12 +384,13 @@ async function broadcastMusicState(
   requestId?: string,
   targetConnectionId?: string,
 ): Promise<void> {
+  const sanitizedState = stripLegacyVolumeFields(state);
   const message = protocolMessage<MusicStateMessage>({
     kind: "MUSIC_STATE",
     requestId,
     targetConnectionId,
     issuedAt: Date.now(),
-    state,
+    state: sanitizedState,
   });
   await OBR.broadcast.sendMessage(BROADCAST_CHANNEL, message, {
     destination: "ALL",
@@ -537,17 +537,6 @@ async function handleMusicControl(
     return;
   }
   const issuedAtGm = Date.now();
-  if (message.action.type === "SET_VOLUMES") {
-    const next = createVolumeMusicState(
-      musicState,
-      message.action.musicVolume,
-      message.action.effectsVolume,
-      identity.connectionId,
-      issuedAtGm,
-    );
-    await publishMusicState(next, message.requestId);
-    return;
-  }
   if (isCinematicMusicLocked(musicState, issuedAtGm)) {
     await broadcastMusicState(musicState, message.requestId, senderConnectionId);
     return;
@@ -721,7 +710,9 @@ async function handleProtocolEvent(event: {
           accepted &&
           message.musicState.authorityConnectionId === identity.connectionId
         ) {
-          void persistMusicState(message.musicState).catch((error: unknown) => {
+          void persistMusicState(
+            stripLegacyVolumeFields(message.musicState),
+          ).catch((error: unknown) => {
             console.error(
               "[cinematic-sync] Falha ao persistir handoff musical.",
               error,
@@ -791,17 +782,27 @@ async function runPreload(): Promise<void> {
 }
 
 async function initialize(): Promise<void> {
-  const [connectionId, name, role, players] = await Promise.all([
+  const [connectionId, playerId, name, role, players] = await Promise.all([
     OBR.player.getConnectionId(),
+    OBR.player.getId(),
     OBR.player.getName(),
     OBR.player.getRole(),
     OBR.party.getPlayers(),
   ]);
   identity = { connectionId, name, role };
   partyPlayers = players.filter((player) => player.connectionId !== connectionId);
-  musicPlayer = new MusicPlayer({
-    gmNow: gmNowForMusic,
-    toLocalTime: localTimeForMusic,
+  musicPlayer = new MusicPlayer(
+    {
+      gmNow: gmNowForMusic,
+      toLocalTime: localTimeForMusic,
+    },
+    loadLocalAudioVolumes(localStorage, playerId),
+  );
+  const volumeStorageKey = localAudioStorageKey(playerId);
+  window.addEventListener("storage", (event) => {
+    if (event.key === volumeStorageKey) {
+      musicPlayer?.setLocalVolumes(parseLocalAudioVolumes(event.newValue));
+    }
   });
   musicHydrationPromise = (async () => {
     try {
@@ -845,8 +846,8 @@ async function initialize(): Promise<void> {
       name: player.name,
       role: player.role,
     };
-    void syncGmTool(player.role).catch((error: unknown) => {
-      console.error("[cinematic-sync] Falha ao atualizar a Tool do GM.", error);
+    void syncTool().catch((error: unknown) => {
+      console.error("[cinematic-sync] Falha ao atualizar a Tool.", error);
     });
     beginClockSyncIfNeeded();
     if (player.role === "GM") {
@@ -859,7 +860,7 @@ async function initialize(): Promise<void> {
     }
   });
 
-  await syncGmTool(role);
+  await syncTool();
   beginClockSyncIfNeeded();
   await musicHydrationPromise;
   await ensureInitialGmMusicState();

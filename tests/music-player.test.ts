@@ -13,9 +13,9 @@ import {
   createInitialMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
-  createVolumeMusicState,
   musicGainAtGm,
 } from "../src/music-state";
+import type { LocalAudioVolumes } from "../src/local-audio-settings";
 
 class FakeAudio extends EventTarget {
   static instances: FakeAudio[] = [];
@@ -90,11 +90,14 @@ describe("persistent music player", () => {
     vi.unstubAllGlobals();
   });
 
-  function createPlayer(): MusicPlayer {
-    return new MusicPlayer({
-      gmNow: () => Date.now(),
-      toLocalTime: (gmTime) => gmTime,
-    });
+  function createPlayer(volumes?: LocalAudioVolumes): MusicPlayer {
+    return new MusicPlayer(
+      {
+        gmNow: () => Date.now(),
+        toLocalTime: (gmTime) => gmTime,
+      },
+      volumes,
+    );
   }
 
   function audioAt(index: number): FakeAudio {
@@ -105,29 +108,32 @@ describe("persistent music player", () => {
     return audio;
   }
 
-  it("treats omitted legacy volumes as full volume", async () => {
+  it("starts O Porão audibly at local 100% even when shared legacy volume is zero", async () => {
     const player = createPlayer();
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
-    const playing = createManualMusicState(
-      initial,
-      { type: "PLAY" },
-      "gm-1",
-      "playing",
-      1_000,
-      1_000,
-    );
-    delete playing.musicVolume;
-    delete playing.effectsVolume;
+    const playing = {
+      ...createManualMusicState(
+        initial,
+        { type: "PLAY" },
+        "gm-1",
+        "playing",
+        1_000,
+        1_000,
+      ),
+      musicVolume: 0,
+      effectsVolume: 0,
+    };
 
     player.applyState(playing);
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(audioAt(0).paused).toBe(false);
+    expect(audioAt(0).playCalls).toBe(1);
     expect(audioAt(0).volume).toBe(1);
-    expect(audioAt(4).volume).toBe(1);
   });
 
-  it("applies independent master volumes without restarting or seeking music", async () => {
-    const player = createPlayer();
+  it("applies independent local volumes without restarting, pausing or seeking", async () => {
+    const player = createPlayer({ musicVolume: 1, effectsVolume: 1 });
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
     const playing = createManualMusicState(
       initial,
@@ -147,42 +153,15 @@ describe("persistent music player", () => {
     const pauseCalls = music.pauseCalls;
     const seekCalls = music.seekCalls;
 
-    const quieterMusic = createVolumeMusicState(
-      playing,
-      0.5,
-      1,
-      "gm-1",
-      1_001,
-    );
-    player.applyState(quieterMusic);
-
+    player.setLocalVolumes({ musicVolume: 0.5, effectsVolume: 1 });
     expect(music.volume).toBe(0.5);
     expect(emf.volume).toBe(1);
-    expect(music.paused).toBe(false);
-    expect(music.currentTime).toBe(12.5);
-    expect(music.playCalls).toBe(playCalls);
-    expect(music.pauseCalls).toBe(pauseCalls);
-    expect(music.seekCalls).toBe(seekCalls);
 
-    const quieterEffects = createVolumeMusicState(
-      quieterMusic,
-      0.5,
-      0.5,
-      "gm-1",
-      1_002,
-    );
-    player.applyState(quieterEffects);
+    player.setLocalVolumes({ musicVolume: 0.5, effectsVolume: 0.25 });
     expect(music.volume).toBe(0.5);
-    expect(emf.volume).toBe(0.5);
+    expect(emf.volume).toBe(0.25);
 
-    const mutedMusic = createVolumeMusicState(
-      quieterEffects,
-      0,
-      0.5,
-      "gm-1",
-      1_003,
-    );
-    player.applyState(mutedMusic);
+    player.setLocalVolumes({ musicVolume: 0, effectsVolume: 0.25 });
     expect(music.volume).toBe(0);
     expect(music.paused).toBe(false);
     expect(music.currentTime).toBe(12.5);
@@ -191,8 +170,8 @@ describe("persistent music player", () => {
     expect(music.seekCalls).toBe(seekCalls);
   });
 
-  it("mutes an active EMF without interrupting its one-shot lifecycle", async () => {
-    const player = createPlayer();
+  it("changes and mutes local EMF gain without interrupting its one-shot", async () => {
+    const player = createPlayer({ musicVolume: 1, effectsVolume: 1 });
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
     const emfState = createEmfMusicState(
       initial,
@@ -209,30 +188,9 @@ describe("persistent music player", () => {
     const playCalls = emf.playCalls;
     const pauseCalls = emf.pauseCalls;
     const seekCalls = emf.seekCalls;
-    const quieter = createVolumeMusicState(
-      emfState,
-      1,
-      0.5,
-      "gm-1",
-      1_001,
-    );
-    player.applyState(quieter);
-
+    player.setLocalVolumes({ musicVolume: 1, effectsVolume: 0.5 });
     expect(emf.volume).toBe(0.5);
-    expect(emf.paused).toBe(false);
-    expect(emf.playCalls).toBe(playCalls);
-    expect(emf.pauseCalls).toBe(pauseCalls);
-    expect(emf.seekCalls).toBe(seekCalls);
-
-    const muted = createVolumeMusicState(
-      quieter,
-      1,
-      0,
-      "gm-1",
-      1_002,
-    );
-    player.applyState(muted);
-
+    player.setLocalVolumes({ musicVolume: 1, effectsVolume: 0 });
     expect(emf.volume).toBe(0);
     expect(emf.paused).toBe(false);
     expect(emf.playCalls).toBe(playCalls);
@@ -241,96 +199,139 @@ describe("persistent music player", () => {
 
     emf.dispatchEvent(new Event("ended"));
     expect(emf.paused).toBe(true);
+
+    player.setLocalVolumes({ musicVolume: 1, effectsVolume: 0.4 });
+    player.applyState(
+      createEmfMusicState(
+        emfState,
+        "emf-2",
+        "gm-1",
+        "emf-playing-next",
+        1_001,
+        1_000,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(audioAt(5).paused).toBe(false);
+    expect(audioAt(5).volume).toBe(0.4);
   });
 
-  it("multiplies the track crossfade envelope by the music master volume", async () => {
-    const player = createPlayer();
+  it("lets two clients use different local volumes for the same playback state", async () => {
+    const firstPlayer = createPlayer({ musicVolume: 0.3, effectsVolume: 1 });
+    const secondPlayer = createPlayer({ musicVolume: 0.6, effectsVolume: 0.5 });
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
-    const adjusted = createVolumeMusicState(
-      initial,
-      0.5,
-      1,
-      "gm-1",
-      1_001,
-    );
     const playing = createManualMusicState(
-      adjusted,
+      initial,
       { type: "PLAY" },
       "gm-1",
       "playing",
-      1_002,
+      1_000,
       1_000,
     );
-    player.applyState(playing);
-    const changed = createManualMusicState(
-      playing,
-      { type: "SELECT_TRACK", trackId: "o-idolo" },
-      "gm-1",
-      "changed",
-      1_003,
-      1_500,
-    );
-    player.applyState(changed);
+    const sharedSnapshot = JSON.stringify(playing);
 
+    firstPlayer.applyState(playing);
+    secondPlayer.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(audioAt(0).volume).toBe(0.3);
+    expect(audioAt(7).volume).toBe(0.6);
+    expect(audioAt(0).currentTime).toBe(audioAt(7).currentTime);
+    firstPlayer.setLocalVolumes({ musicVolume: 0.2, effectsVolume: 1 });
+    expect(audioAt(0).volume).toBe(0.2);
+    expect(audioAt(7).volume).toBe(0.6);
+
+    const emfState = createEmfMusicState(
+      playing,
+      "emf-1",
+      "gm-1",
+      "shared-emf",
+      1_001,
+      1_000,
+    );
+    firstPlayer.applyState(emfState);
+    secondPlayer.applyState(emfState);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(audioAt(4).volume).toBe(1);
+    expect(audioAt(11).volume).toBe(0.5);
+    firstPlayer.setLocalVolumes({ musicVolume: 0.2, effectsVolume: 0.25 });
+    expect(audioAt(4).volume).toBe(0.25);
+    expect(audioAt(11).volume).toBe(0.5);
+    expect(JSON.stringify(playing)).toBe(sharedSnapshot);
+  });
+
+  it("multiplies crossfade envelopes by local music volume", async () => {
+    const crossfadePlayer = createPlayer({
+      musicVolume: 0.5,
+      effectsVolume: 1,
+    });
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const playing = createManualMusicState(
+      initial,
+      { type: "PLAY" },
+      "gm-1",
+      "playing",
+      1_000,
+      1_000,
+    );
+    crossfadePlayer.applyState(playing);
+    crossfadePlayer.applyState(
+      createManualMusicState(
+        playing,
+        { type: "SELECT_TRACK", trackId: "o-idolo" },
+        "gm-1",
+        "changed",
+        1_001,
+        1_500,
+      ),
+    );
     await vi.advanceTimersByTimeAsync(500 + MUSIC_TRACK_CROSSFADE_MS / 2);
     expect(audioAt(0).volume).toBeCloseTo(Math.SQRT1_2 * 0.5, 2);
     expect(audioAt(2).volume).toBeCloseTo(Math.SQRT1_2 * 0.5, 2);
+    await vi.advanceTimersByTimeAsync(MUSIC_TRACK_CROSSFADE_MS / 2 + 100);
+    expect(audioAt(2).paused).toBe(false);
+    expect(audioAt(2).volume).toBe(0.5);
   });
 
-  it("multiplies the cinematic handoff and post-cinematic gain by music volume", async () => {
-    const player = createPlayer();
+  it("multiplies cinematic handoff envelopes by local music volume", async () => {
+    const handoffPlayer = createPlayer({
+      musicVolume: 0.5,
+      effectsVolume: 0.25,
+    });
     const cinematic = createCinematicMusicState(
       "gm-1",
       "cinematic",
       1,
       1_000,
       2_500,
-      1,
-      0.25,
     );
-    player.applyState(cinematic);
+    handoffPlayer.applyState(cinematic);
     const handoff = cinematic.cinematic;
     const outro = handoff?.outro;
-    const track = audioAt(0);
-
     await vi.advanceTimersByTimeAsync(
       (outro?.startAtGm ?? Number.NaN) - Date.now(),
     );
     await vi.advanceTimersByTimeAsync((outro?.durationMs ?? 0) / 2);
-    const originalEnvelopeGain = track.volume;
-    const playCalls = track.playCalls;
-    const pauseCalls = track.pauseCalls;
-    const seekCalls = track.seekCalls;
-    const quieterCinematic = createVolumeMusicState(
-      cinematic,
-      0.5,
-      0.25,
-      "gm-1",
-      Date.now(),
-    );
-    player.applyState(quieterCinematic);
-    expect(track.volume).toBeCloseTo(originalEnvelopeGain * 0.5, 9);
-    expect(track.playCalls).toBe(playCalls);
-    expect(track.pauseCalls).toBe(pauseCalls);
-    expect(track.seekCalls).toBe(seekCalls);
+    const localGain = audioAt(0).volume;
+    handoffPlayer.setLocalVolumes({ musicVolume: 1, effectsVolume: 0.25 });
+    expect(audioAt(0).volume).toBeCloseTo(localGain * 2, 9);
+    handoffPlayer.setLocalVolumes({ musicVolume: 0.5, effectsVolume: 0.25 });
 
     await vi.advanceTimersByTimeAsync(
       (handoff?.videoEndsAtGm ?? Number.NaN) - Date.now(),
     );
-    player.reconcile(quieterCinematic);
-    const gainAtVideoEnd =
-      CINEMATIC_OUTRO_MUSIC.closingGain * 0.5;
-    expect(track.volume).toBeCloseTo(gainAtVideoEnd, 7);
-
+    handoffPlayer.reconcile(cinematic);
+    const gainAtVideoEnd = CINEMATIC_OUTRO_MUSIC.closingGain * 0.5;
+    expect(audioAt(0).volume).toBeCloseTo(gainAtVideoEnd, 7);
     const completed = createPostCinematicMusicState(
-      quieterCinematic,
+      cinematic,
       "gm-1",
       "manual-after-cinematic",
       handoff?.videoEndsAtGm ?? Number.NaN,
     );
-    player.applyState(completed);
+    handoffPlayer.applyState(completed);
     await vi.advanceTimersByTimeAsync(0);
-    expect(track.volume).toBeCloseTo(gainAtVideoEnd, 7);
+    expect(audioAt(0).volume).toBeCloseTo(gainAtVideoEnd, 7);
     expect(audioAt(4).volume).toBe(0.25);
   });
 
@@ -729,18 +730,11 @@ describe("persistent music player", () => {
   });
 
   it("alternates two compressed voices across two scheduled seams", async () => {
-    const player = createPlayer();
+    const player = createPlayer({ musicVolume: 0.5, effectsVolume: 1 });
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
-    const adjusted = createVolumeMusicState(
-      initial,
-      0.5,
-      1,
-      "gm-1",
-      1_001,
-    );
     const cycleSeconds = getMusicLoopCycleSeconds("o-porao");
     const seeked = createManualMusicState(
-      adjusted,
+      initial,
       { type: "SEEK", positionSeconds: cycleSeconds - 1 },
       "gm-1",
       "seeked",

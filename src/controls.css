@@ -15,8 +15,7 @@ body {
   background: #202124;
 }
 
-body.booting,
-body.unauthorized {
+body.booting {
   visibility: hidden;
 }
 
@@ -145,6 +144,10 @@ section {
 .volume-control output {
   font: 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
   text-align: right;
+}
+
+.player-panel .volume-control {
+  margin-top: 0;
 }
 
 #emf-status {

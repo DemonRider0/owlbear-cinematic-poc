@@ -15,8 +15,6 @@ import {
 } from "./config";
 import {
   emfPositionAtGm,
-  getEffectsVolume,
-  getMusicVolume,
   musicGainAtGm,
   musicPositionAtGm,
   nextMusicLoopSeamAtGm,
@@ -24,6 +22,11 @@ import {
   normalizeMusicPosition,
   type MusicState,
 } from "./music-state";
+import {
+  DEFAULT_LOCAL_AUDIO_VOLUMES,
+  normalizeLocalAudioVolumes,
+  type LocalAudioVolumes,
+} from "./local-audio-settings";
 
 interface MusicClock {
   gmNow(): number;
@@ -51,6 +54,7 @@ interface TrackDeck {
 
 interface EmfVoice {
   element: HTMLAudioElement;
+  gain: number;
   id: EmfId;
   playToken: number;
 }
@@ -92,16 +96,22 @@ export class MusicPlayer {
   private readonly emfs = new Map<EmfId, EmfVoice>();
   private readonly tracks = new Map<MusicTrackId, TrackDeck>();
   private readonly timers = new Set<Timer>();
-  private musicVolume = 1;
-  private effectsVolume = 1;
+  private localMusicVolume: number;
+  private localEffectsVolume: number;
   private appliedStateId: string | undefined;
   private currentState: MusicState | undefined;
   private pendingActivationTimer: Timer | undefined;
   private receivedStateId: string | undefined;
   private completedEmfStateId: string | undefined;
 
-  constructor(clock: MusicClock) {
+  constructor(
+    clock: MusicClock,
+    initialVolumes: LocalAudioVolumes = DEFAULT_LOCAL_AUDIO_VOLUMES,
+  ) {
     this.clock = clock;
+    const normalizedVolumes = normalizeLocalAudioVolumes(initialVolumes);
+    this.localMusicVolume = normalizedVolumes.musicVolume;
+    this.localEffectsVolume = normalizedVolumes.effectsVolume;
     for (const config of MUSIC_TRACKS) {
       const createVoice = (slot: VoiceSlot): TrackVoice => {
         const element = new Audio();
@@ -135,7 +145,7 @@ export class MusicPlayer {
       const element = new Audio();
       element.preload = "auto";
       element.loop = false;
-      element.volume = 1;
+      element.volume = this.localEffectsVolume;
       element.src = getEmfRequestUrl(config.id);
       element.addEventListener("error", () => {
         console.error(
@@ -145,6 +155,7 @@ export class MusicPlayer {
       });
       this.emfs.set(config.id, {
         element,
+        gain: 1,
         id: config.id,
         playToken: 0,
       });
@@ -206,9 +217,7 @@ export class MusicPlayer {
   }
 
   applyState(state: MusicState): void {
-    this.applyMasterVolumes(state);
     if (this.receivedStateId === state.stateId) {
-      this.currentState = state;
       return;
     }
     this.receivedStateId = state.stateId;
@@ -236,6 +245,22 @@ export class MusicPlayer {
       return;
     }
     this.activateState(state);
+  }
+
+  setLocalVolumes(volumes: LocalAudioVolumes): void {
+    const normalized = normalizeLocalAudioVolumes(volumes);
+    if (normalized.musicVolume !== this.localMusicVolume) {
+      this.localMusicVolume = normalized.musicVolume;
+      for (const voice of this.allVoices()) {
+        this.refreshVoiceVolume(voice);
+      }
+    }
+    if (normalized.effectsVolume !== this.localEffectsVolume) {
+      this.localEffectsVolume = normalized.effectsVolume;
+      for (const voice of this.emfs.values()) {
+        this.refreshEmfVolume(voice);
+      }
+    }
   }
 
   private activateState(state: MusicState): void {
@@ -1216,29 +1241,12 @@ export class MusicPlayer {
   private refreshVoiceVolume(voice: TrackVoice): void {
     const deck = this.requiredDeck(voice.trackId);
     voice.element.volume = clamp01(
-      deck.trackGain * voice.gain * this.musicVolume,
+      deck.trackGain * voice.gain * this.localMusicVolume,
     );
   }
 
   private refreshEmfVolume(voice: EmfVoice): void {
-    voice.element.volume = this.effectsVolume;
-  }
-
-  private applyMasterVolumes(state: MusicState): void {
-    const nextMusicVolume = getMusicVolume(state);
-    const nextEffectsVolume = getEffectsVolume(state);
-    if (nextMusicVolume !== this.musicVolume) {
-      this.musicVolume = nextMusicVolume;
-      for (const voice of this.allVoices()) {
-        this.refreshVoiceVolume(voice);
-      }
-    }
-    if (nextEffectsVolume !== this.effectsVolume) {
-      this.effectsVolume = nextEffectsVolume;
-      for (const voice of this.emfs.values()) {
-        this.refreshEmfVolume(voice);
-      }
-    }
+    voice.element.volume = clamp01(voice.gain * this.localEffectsVolume);
   }
 
   private requiredDeck(trackId: MusicTrackId): TrackDeck {

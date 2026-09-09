@@ -13,8 +13,8 @@
 
       <section class="music-panel" aria-labelledby="music-heading">
         <h2 id="music-heading">Música</h2>
-        <p id="music-current" class="music-current">Carregando faixas…</p>
-        <div class="music-transport">
+        <p id="music-current" class="music-current" data-gm-only>Carregando faixas…</p>
+        <div class="music-transport" data-gm-only>
           <button
             id="music-toggle"
             class="music-toggle"
@@ -37,7 +37,7 @@
           />
           <span id="music-duration" class="music-time">00:00</span>
         </div>
-        <div id="music-track-list" class="music-track-list" aria-label="Faixas">
+        <div id="music-track-list" class="music-track-list" aria-label="Faixas" data-gm-only>
           <button type="button" data-track-id="o-porao" disabled>O Porão</button>
           <button type="button" data-track-id="o-idolo" disabled>O Ídolo</button>
         </div>
@@ -55,12 +55,12 @@
           />
           <output id="music-volume-value" for="music-volume">100%</output>
         </div>
-        <p id="music-status" class="secondary">Aguardando estado sincronizado…</p>
+        <p id="music-status" class="secondary" data-gm-only>Aguardando estado sincronizado…</p>
       </section>
 
       <section class="emf-panel" aria-labelledby="emf-heading">
         <h2 id="emf-heading">EMF</h2>
-        <div class="emf-list" aria-label="Áudios EMF">
+        <div class="emf-list" aria-label="Áudios EMF" data-gm-only>
           <button type="button" data-emf-id="emf-1" disabled>EMF 1</button>
           <button type="button" data-emf-id="emf-2" disabled>EMF 2</button>
           <button type="button" data-emf-id="emf-3" disabled>EMF 3</button>
@@ -79,10 +79,10 @@
           />
           <output id="effects-volume-value" for="effects-volume">100%</output>
         </div>
-        <p id="emf-status" class="secondary">Aguardando estado sincronizado…</p>
+        <p id="emf-status" class="secondary" data-gm-only>Aguardando estado sincronizado…</p>
       </section>
 
-      <section class="cinematic-panel" aria-labelledby="cinematic-heading">
+      <section class="cinematic-panel" aria-labelledby="cinematic-heading" data-gm-only>
         <h2 id="cinematic-heading">Cinemática</h2>
         <p id="overall-state" class="overall-state">Estado: Preparando…</p>
         <p id="ready-count">Clientes prontos: 0 / 0</p>
@@ -92,7 +92,7 @@
         <button id="play-button" type="button" disabled>REPRODUZIR</button>
       </section>
 
-      <details>
+      <details data-gm-only>
         <summary>Diagnóstico técnico</summary>
         <textarea id="diagnostics" readonly spellcheck="false"></textarea>
         <button id="copy-diagnostics" class="secondary-button" type="button">

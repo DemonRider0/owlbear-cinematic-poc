@@ -1,9 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  BROADCAST_CHANNEL,
-  MUSIC_ROOM_METADATA_KEY,
-  PROTOCOL_VERSION,
-} from "../src/config";
+import { PROTOCOL_VERSION } from "../src/config";
+import { localAudioStorageKey } from "../src/local-audio-settings";
+import { createInitialMusicState } from "../src/music-state";
 
 interface BroadcastEvent {
   connectionId: string;
@@ -14,9 +12,16 @@ const sdk = vi.hoisted(() => ({
   onReady: vi.fn(),
   sendMessage: vi.fn(),
   createTool: vi.fn(),
+  getPlayerId: vi.fn(),
+  getRole: vi.fn(),
+  openPopover: vi.fn(),
+  applyMusicState: vi.fn(),
   setMetadata: vi.fn(),
+  setLocalVolumes: vi.fn(),
+  initialVolumes: undefined as unknown,
   readyCallback: undefined as (() => void) | undefined,
   messageCallback: undefined as ((event: BroadcastEvent) => void) | undefined,
+  storageCallback: undefined as ((event: StorageEvent) => void) | undefined,
 }));
 
 const media = vi.hoisted(() => ({
@@ -31,8 +36,9 @@ vi.mock("@owlbear-rodeo/sdk", () => ({
     },
     player: {
       getConnectionId: vi.fn().mockResolvedValue("gm-connection"),
+      getId: sdk.getPlayerId,
       getName: vi.fn().mockResolvedValue("GM"),
-      getRole: vi.fn().mockResolvedValue("GM"),
+      getRole: sdk.getRole,
       onChange: vi.fn(),
     },
     party: {
@@ -57,7 +63,7 @@ vi.mock("@owlbear-rodeo/sdk", () => ({
       remove: vi.fn(),
     },
     popover: {
-      open: vi.fn(),
+      open: sdk.openPopover,
     },
     modal: {
       open: vi.fn(),
@@ -71,11 +77,43 @@ vi.mock("../src/media-cache", () => ({
 
 vi.mock("../src/music-player", () => ({
   MusicPlayer: class {
+    constructor(_clock: unknown, volumes: unknown) {
+      sdk.initialVolumes = volumes;
+    }
     preload = vi.fn();
-    applyState = vi.fn();
+    applyState = sdk.applyMusicState;
     reconcile = vi.fn();
+    setLocalVolumes = sdk.setLocalVolumes;
   },
 }));
+
+class MemoryStorage implements Storage {
+  private readonly values = new Map<string, string>();
+
+  get length(): number {
+    return this.values.size;
+  }
+
+  clear(): void {
+    this.values.clear();
+  }
+
+  getItem(key: string): string | null {
+    return this.values.get(key) ?? null;
+  }
+
+  key(index: number): string | null {
+    return [...this.values.keys()][index] ?? null;
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key);
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value);
+  }
+}
 
 async function startBackground(): Promise<void> {
   await import("../src/background");
@@ -96,10 +134,25 @@ describe("background startup", () => {
     vi.clearAllMocks();
     sdk.readyCallback = undefined;
     sdk.messageCallback = undefined;
+    sdk.storageCallback = undefined;
+    sdk.initialVolumes = undefined;
+    sdk.getPlayerId.mockResolvedValue("player-local");
+    sdk.getRole.mockResolvedValue("GM");
     sdk.sendMessage.mockResolvedValue(undefined);
     sdk.createTool.mockResolvedValue(undefined);
+    sdk.openPopover.mockResolvedValue(undefined);
     sdk.setMetadata.mockResolvedValue(undefined);
+    const storage = new MemoryStorage();
+    vi.stubGlobal("localStorage", storage);
     vi.stubGlobal("window", {
+      addEventListener(
+        eventName: string,
+        callback: (event: StorageEvent) => void,
+      ) {
+        if (eventName === "storage") {
+          sdk.storageCallback = callback;
+        }
+      },
       location: { href: "http://localhost:5173/background.html" },
       setTimeout,
       setInterval,
@@ -121,10 +174,40 @@ describe("background startup", () => {
     await startBackground();
 
     expect(sdk.createTool).toHaveBeenCalledOnce();
+    expect(sdk.createTool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        icons: [
+          expect.objectContaining({
+            filter: { roles: ["GM", "PLAYER"] },
+          }),
+        ],
+      }),
+    );
     expect(media.preloadCinematic).toHaveBeenCalledWith(
       "http://localhost:5173/assets/cinematic.mp4?cinematic-cache=v2",
     );
     expect(lastReportedPhase()).toBe("READY");
+  });
+
+  it("allows a PLAYER to open the compact volume panel", async () => {
+    media.preloadCinematic.mockResolvedValue({
+      bytes: 10_199_007,
+      readyState: 3,
+    });
+    await startBackground();
+    sdk.getRole.mockResolvedValue("PLAYER");
+
+    const tool = sdk.createTool.mock.calls[0]?.[0] as {
+      onClick: (context: unknown, elementId: string) => Promise<boolean>;
+    };
+    await tool.onClick({}, "tool-element");
+
+    expect(sdk.openPopover).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url: "http://localhost:5173/controls.html",
+        height: 260,
+      }),
+    );
   });
 
   it("keeps the background initialized and reports ERROR when preload fails", async () => {
@@ -142,62 +225,105 @@ describe("background startup", () => {
     ).toBe(false);
   });
 
-  it("persists and broadcasts independent volume updates in the shared music state", async () => {
+  it("loads and applies local volume changes without touching shared state", async () => {
+    media.preloadCinematic.mockResolvedValue({
+      bytes: 10_199_007,
+      readyState: 3,
+    });
+    localStorage.setItem(
+      localAudioStorageKey("player-local"),
+      JSON.stringify({ musicVolume: 0.3, effectsVolume: 0.25 }),
+    );
+    await startBackground();
+
+    expect(sdk.initialVolumes).toEqual({
+      musicVolume: 0.3,
+      effectsVolume: 0.25,
+    });
+    sdk.setMetadata.mockClear();
+    sdk.sendMessage.mockClear();
+    sdk.setLocalVolumes.mockClear();
+
+    sdk.storageCallback?.({
+      key: localAudioStorageKey("player-local"),
+      newValue: JSON.stringify({
+        musicVolume: 0.6,
+        effectsVolume: 0.4,
+      }),
+    } as StorageEvent);
+
+    expect(sdk.setLocalVolumes).toHaveBeenCalledWith({
+      musicVolume: 0.6,
+      effectsVolume: 0.4,
+    });
+    expect(sdk.setMetadata).not.toHaveBeenCalled();
+    expect(sdk.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores legacy shared volumes received by Broadcast", async () => {
     media.preloadCinematic.mockResolvedValue({
       bytes: 10_199_007,
       readyState: 3,
     });
     await startBackground();
+    sdk.applyMusicState.mockClear();
+    sdk.setLocalVolumes.mockClear();
 
-    const initialMetadata = sdk.setMetadata.mock.calls.at(-1)?.[0] as
-      | Record<string, unknown>
-      | undefined;
-    const initialState = initialMetadata?.[MUSIC_ROOM_METADATA_KEY] as
-      | { stateId?: string }
-      | undefined;
-    sdk.setMetadata.mockClear();
-    sdk.sendMessage.mockClear();
-
+    const legacyState = {
+      ...createInitialMusicState(
+        "gm-connection",
+        "legacy-broadcast",
+        Date.now() + 10_000,
+      ),
+      revision: 10,
+      musicVolume: 0,
+      effectsVolume: 0.25,
+    };
     sdk.messageCallback?.({
       connectionId: "gm-connection",
       data: {
         version: PROTOCOL_VERSION,
-        kind: "MUSIC_CONTROL",
-        requestId: "volume-control",
+        kind: "MUSIC_STATE",
         issuedAt: Date.now(),
-        action: {
-          type: "SET_VOLUMES",
-          musicVolume: 0.5,
-          effectsVolume: 0.25,
-        },
+        state: legacyState,
       },
     });
 
-    await vi.waitFor(() => expect(sdk.setMetadata).toHaveBeenCalledOnce());
-    const metadata = sdk.setMetadata.mock.calls[0]?.[0] as Record<
-      string,
-      unknown
-    >;
-    const state = metadata[MUSIC_ROOM_METADATA_KEY] as {
-      stateId: string;
-      musicVolume: number;
-      effectsVolume: number;
-    };
-    expect(state.stateId).toBe(initialState?.stateId);
-    expect(state.musicVolume).toBe(0.5);
-    expect(state.effectsVolume).toBe(0.25);
     await vi.waitFor(() =>
-      expect(sdk.sendMessage).toHaveBeenCalledWith(
-        BROADCAST_CHANNEL,
-        expect.objectContaining({
-          kind: "MUSIC_STATE",
-          state: expect.objectContaining({
-            musicVolume: 0.5,
-            effectsVolume: 0.25,
-          }),
-        }),
-        { destination: "ALL" },
-      ),
+      expect(
+        sdk.applyMusicState.mock.calls.some(
+          ([state]) => state?.stateId === "legacy-broadcast",
+        ),
+      ).toBe(true),
     );
+    const appliedState = sdk.applyMusicState.mock.calls.find(
+      ([state]) => state?.stateId === "legacy-broadcast",
+    )?.[0];
+    expect(appliedState).not.toHaveProperty("musicVolume");
+    expect(appliedState).not.toHaveProperty("effectsVolume");
+    expect(sdk.setLocalVolumes).not.toHaveBeenCalled();
+
+    sdk.sendMessage.mockClear();
+    sdk.messageCallback?.({
+      connectionId: "gm-connection",
+      data: {
+        version: PROTOCOL_VERSION,
+        kind: "MUSIC_STATE_REQUEST",
+        requestId: "legacy-state-request",
+        issuedAt: Date.now(),
+      },
+    });
+    await vi.waitFor(() =>
+      expect(
+        sdk.sendMessage.mock.calls.some(
+          ([, message]) => message?.kind === "MUSIC_STATE",
+        ),
+      ).toBe(true),
+    );
+    const rebroadcastState = sdk.sendMessage.mock.calls.find(
+      ([, message]) => message?.kind === "MUSIC_STATE",
+    )?.[1]?.state;
+    expect(rebroadcastState).not.toHaveProperty("musicVolume");
+    expect(rebroadcastState).not.toHaveProperty("effectsVolume");
   });
 });
