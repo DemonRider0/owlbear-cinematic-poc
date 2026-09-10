@@ -27,6 +27,7 @@ import {
   normalizeLocalAudioVolumes,
   type LocalAudioVolumes,
 } from "./local-audio-settings";
+import { type LocalSessionSource } from "./local-session-source";
 
 interface MusicClock {
   gmNow(): number;
@@ -92,6 +93,11 @@ function circularDistance(
 }
 
 export class MusicPlayer {
+  private resolvedAudio?: { source: LocalSessionSource; element: HTMLAudioElement; url: string };
+  private previousResolvedAudio?: { source: LocalSessionSource; element: HTMLAudioElement; url: string };
+  private localPlayToken = 0;
+  private resolvedPreparationAbort?: AbortController;
+  onLocalPlaybackError?: () => void;
   private readonly clock: MusicClock;
   private readonly emfs = new Map<EmfId, EmfVoice>();
   private readonly tracks = new Map<MusicTrackId, TrackDeck>();
@@ -251,6 +257,8 @@ export class MusicPlayer {
     const normalized = normalizeLocalAudioVolumes(volumes);
     if (normalized.musicVolume !== this.localMusicVolume) {
       this.localMusicVolume = normalized.musicVolume;
+      if (this.resolvedAudio) this.resolvedAudio.element.volume = normalized.musicVolume;
+      if (this.previousResolvedAudio) this.previousResolvedAudio.element.volume = normalized.musicVolume;
       for (const voice of this.allVoices()) {
         this.refreshVoiceVolume(voice);
       }
@@ -267,8 +275,18 @@ export class MusicPlayer {
     this.appliedStateId = state.stateId;
     this.currentState = state;
     this.cancelAutomation();
+    this.localPlayToken++;
+    if (this.previousResolvedAudio && (state.mode !== "MANUAL" || state.source?.sessionTrackId !== this.previousResolvedAudio.source.sessionTrackId)) {
+      this.releaseResolvedAudio(this.previousResolvedAudio);
+      this.previousResolvedAudio = undefined;
+    }
+    if (!state.source || state.mode !== "MANUAL") this.resolvedAudio?.element.pause();
 
-    if (state.mode === "CINEMATIC") {
+    if (state.source && state.mode === "MANUAL") {
+      this.pauseAll();
+      this.pauseAllEmfs();
+      this.scheduleAt(this.clock.toLocalTime(state.anchorAtGm, state.updatedAtGm), () => this.applyResolvedAudio(state));
+    } else if (state.mode === "CINEMATIC") {
       this.applyCinematicState(state);
     } else if (state.mode === "EMF") {
       this.applyEmfState(state);
@@ -285,6 +303,10 @@ export class MusicPlayer {
     const gmNow = this.clock.gmNow();
     if (state.mode === "EMF") {
       this.reconcileEmf(state, gmNow);
+      return;
+    }
+    if (state.source) {
+      if (gmNow >= state.anchorAtGm) this.applyResolvedAudio(state, true);
       return;
     }
     if (!state.playing) {
@@ -326,6 +348,96 @@ export class MusicPlayer {
     ) {
       this.setPosition(voice.element, expected);
     }
+  }
+
+  async setResolvedSource(source: LocalSessionSource, blob: Blob): Promise<void> {
+    if (this.resolvedAudio?.source.sessionTrackId === source.sessionTrackId && this.resolvedAudio.source.sha256 === source.sha256 &&
+      this.resolvedAudio.element.readyState >= 3) return;
+    this.resolvedPreparationAbort?.abort();
+    if (this.resolvedAudio && this.currentState?.mode === "MANUAL" &&
+      this.currentState.source?.sessionTrackId === this.resolvedAudio.source.sessionTrackId) {
+      this.releaseResolvedAudio(this.previousResolvedAudio);
+      this.previousResolvedAudio = this.resolvedAudio;
+    } else this.releaseResolvedAudio(this.resolvedAudio);
+    this.resolvedAudio = undefined;
+    const element = new Audio();
+    const url = URL.createObjectURL(blob);
+    element.preload = "auto";
+    element.loop = false;
+    element.volume = this.localMusicVolume;
+    element.src = url;
+    element.load();
+    this.resolvedAudio = { source, element, url };
+    const abort = new AbortController();
+    this.resolvedPreparationAbort = abort;
+    try { await new Promise<void>((resolve, reject) => {
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        element.removeEventListener("canplay", ready);
+        element.removeEventListener("error", failed);
+        abort.signal.removeEventListener("abort", failed);
+      };
+      const ready = (): void => { if (element.readyState >= 3) { cleanup(); resolve(); } };
+      const failed = (): void => { cleanup(); reject(new Error("Player não preparou o áudio local.")); };
+      const timer = setTimeout(failed, 30_000);
+      element.addEventListener("canplay", ready);
+      element.addEventListener("error", failed);
+      abort.signal.addEventListener("abort", failed);
+      ready();
+    }); } catch (error) {
+      if (this.resolvedAudio?.element === element) {
+        this.releaseResolvedAudio(this.resolvedAudio);
+        this.resolvedAudio = undefined;
+      }
+      throw error;
+    } finally {
+      if (this.resolvedPreparationAbort === abort) this.resolvedPreparationAbort = undefined;
+    }
+    element.onerror = () => this.onLocalPlaybackError?.();
+    // A late cache resolution may reuse an already received state.
+    if (this.currentState?.source?.sessionTrackId === source.sessionTrackId) this.receivedStateId = undefined;
+  }
+
+  clearResolvedSource(): void {
+    this.localPlayToken++;
+    this.resolvedPreparationAbort?.abort();
+    this.resolvedPreparationAbort = undefined;
+    this.releaseResolvedAudio(this.resolvedAudio);
+    this.releaseResolvedAudio(this.previousResolvedAudio);
+    this.resolvedAudio = undefined;
+    this.previousResolvedAudio = undefined;
+  }
+
+  private releaseResolvedAudio(resolved: MusicPlayer["resolvedAudio"]): void {
+    if (!resolved) return;
+    resolved.element.onerror = null;
+    resolved.element.pause();
+    resolved.element.removeAttribute("src");
+    resolved.element.load();
+    URL.revokeObjectURL(resolved.url);
+  }
+
+  private applyResolvedAudio(state: MusicState, reconcile = false): void {
+    const resolved = [this.resolvedAudio, this.previousResolvedAudio].find((voice) =>
+      voice?.source.sessionTrackId === state.source?.sessionTrackId && voice?.source.sha256 === state.source?.sha256);
+    if (state.stateId !== this.appliedStateId || !state.source ||
+      resolved?.source.sessionTrackId !== state.source.sessionTrackId || resolved.source.sha256 !== state.source.sha256) return;
+    const element = resolved.element;
+    const position = musicPositionAtGm(state, this.clock.gmNow());
+    if (!reconcile || Math.abs(element.currentTime - position) > MUSIC_DRIFT_TOLERANCE_SECONDS) this.setPosition(element, position);
+    element.volume = this.localMusicVolume;
+    if (!state.playing || position >= state.source.durationSeconds) { element.pause(); return; }
+    if (!element.paused) return;
+    const token = ++this.localPlayToken;
+    void element.play().then(() => {
+      if (token !== this.localPlayToken && this.currentState?.stateId !== state.stateId) element.pause();
+      else if (this.currentState?.stateId === state.stateId && !element.paused) {
+        const expected = musicPositionAtGm(state, this.clock.gmNow());
+        if (Math.abs(element.currentTime - expected) > MUSIC_DRIFT_TOLERANCE_SECONDS) this.setPosition(element, expected);
+      }
+    }).catch(() => {
+      if (token === this.localPlayToken) this.onLocalPlaybackError?.();
+    });
   }
 
   private applyManualState(state: MusicState): void {

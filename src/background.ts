@@ -16,6 +16,8 @@ import {
 import { toSerializableError } from "./errors";
 import { preloadCinematic } from "./media-cache";
 import { MusicPlayer } from "./music-player";
+import { LocalSession } from "./local-session";
+import { LOCAL_SESSION_CHANNEL, LOCAL_SESSION_METADATA_KEY, isLocalSessionSource } from "./local-session-source";
 import {
   loadLocalAudioVolumes,
   localAudioStorageKey,
@@ -71,6 +73,9 @@ let clockSyncTarget: string | undefined;
 let preferredGmConnectionId: string | undefined;
 let validClockSamples = 0;
 let musicPlayer: MusicPlayer | undefined;
+let localSession: LocalSession | undefined;
+let localControlBusy = false;
+let localSourceClockOffset = 0;
 let musicState: MusicState | undefined;
 let musicHydrationPromise: Promise<void> | undefined;
 let cinematicCompletionTimer: number | undefined;
@@ -313,7 +318,8 @@ function gmNowForMusic(): number {
     authorityConnectionId !== identity.connectionId &&
     clockDiagnostics?.gmConnectionId === authorityConnectionId
       ? clockDiagnostics.offsetGmMinusLocalMs
-      : 0;
+      : musicState?.source ? localSourceClockOffset : 0;
+  if (musicState?.source) localSourceClockOffset = offset;
   return Date.now() + offset;
 }
 
@@ -536,13 +542,37 @@ async function handleMusicControl(
   if (!musicState) {
     return;
   }
-  const issuedAtGm = Date.now();
+  let issuedAtGm = Date.now();
   if (isCinematicMusicLocked(musicState, issuedAtGm)) {
     await broadcastMusicState(musicState, message.requestId, senderConnectionId);
     return;
   }
   const stateId = crypto.randomUUID();
-  const applyAtGm = issuedAtGm + MUSIC_COMMAND_DELAY_MS;
+  let applyAtGm = issuedAtGm + MUSIC_COMMAND_DELAY_MS;
+  if (message.action.type === "SELECT_LOCAL_SESSION") {
+    if (localControlBusy) return;
+    localControlBusy = true;
+    try {
+      const current = musicState;
+      const source = localSession?.source;
+      if (!source || source.sessionTrackId !== message.action.sessionTrackId || !(await localSession?.allReady()) ||
+        musicState !== current || !localSession?.hasResolved(source)) return;
+      await publishMusicState({
+        ...createInitialMusicState(identity.connectionId, stateId, Date.now()),
+        revision: current.revision + 1, updatedAtGm: Math.max(Date.now(), current.updatedAtGm + 1),
+        source, anchorAtGm: Date.now() + MUSIC_COMMAND_DELAY_MS,
+      }, message.requestId);
+    } finally { localControlBusy = false; }
+    return;
+  }
+  if (musicState.source && (message.action.type === "PLAY" ||
+    (message.action.type === "SEEK" && musicState.playing))) {
+    const expected = musicState;
+    if (!(await localSession?.allReady()) || musicState !== expected ||
+      !localSession?.hasResolved(expected.source!)) return;
+    issuedAtGm = Date.now();
+    applyAtGm = issuedAtGm + MUSIC_COMMAND_DELAY_MS;
+  }
   const next =
     message.action.type === "PLAY_EMF"
       ? createEmfMusicState(
@@ -798,6 +828,51 @@ async function initialize(): Promise<void> {
     },
     loadLocalAudioVolumes(localStorage, playerId),
   );
+  const sessionPeers = async () => {
+    const [players, currentRole] = await Promise.all([OBR.party.getPlayers(), OBR.player.getRole()]);
+    identity.role = currentRole;
+    return [identity, ...players.filter((peer) => peer.connectionId !== identity.connectionId)];
+  };
+  let snapshotPending = false;
+  const publishSessionSnapshot = (): void => {
+    if (snapshotPending || identity.role !== "GM") return;
+    snapshotPending = true;
+    void (async () => {
+      try {
+        await OBR.broadcast.sendMessage(LOCAL_SESSION_CHANNEL, {
+          kind: "SNAPSHOT", ...localSession?.snapshot(), canPlay: await localSession?.allReady(),
+        }, { destination: "LOCAL" });
+      } finally { snapshotPending = false; }
+    })().catch(() => {});
+  };
+  localSession = new LocalSession({
+    identity: () => identity, playerId, peers: sessionPeers,
+    send: async (message) => { await OBR.broadcast.sendMessage(LOCAL_SESSION_CHANNEL, message, { destination: "ALL" }); },
+    persist: async (source) => { await OBR.room.setMetadata({ [LOCAL_SESSION_METADATA_KEY]: source }); },
+    canImport: () => !musicState || (!isCinematicMusicLocked(musicState, Date.now()) && musicState.authorityConnectionId === identity.connectionId),
+    clockReady: (owner) => owner === identity.connectionId || clockDiagnostics?.gmConnectionId === owner,
+    resolved: async (source, blob) => {
+      await musicPlayer?.setResolvedSource(source, blob);
+      if (musicState?.source?.sessionTrackId === source.sessionTrackId) applyMusicStateIfClockReady();
+    },
+    changed: publishSessionSnapshot,
+  });
+  musicPlayer.onLocalPlaybackError = () => localSession?.playbackFailed();
+  const unsubscribeSession = OBR.broadcast.onMessage(LOCAL_SESSION_CHANNEL, (event) => {
+    if (event.connectionId === identity.connectionId && (event.data as { kind?: string } | null)?.kind === "SNAPSHOT_REQUEST") {
+      publishSessionSnapshot(); return;
+    }
+    void localSession?.handle(event.connectionId, event.data).catch(() => {});
+  });
+  const sessionTimer = window.setInterval(() => {
+    void localSession?.tick().catch(() => {});
+    publishSessionSnapshot();
+  }, 5_000);
+  window.addEventListener("pagehide", () => {
+    window.clearInterval(sessionTimer);
+    unsubscribeSession?.();
+    localSession?.dispose(); musicPlayer?.clearResolvedSource();
+  });
   const volumeStorageKey = localAudioStorageKey(playerId);
   window.addEventListener("storage", (event) => {
     if (event.key === volumeStorageKey) {
@@ -807,9 +882,28 @@ async function initialize(): Promise<void> {
   musicHydrationPromise = (async () => {
     try {
       const metadata = await OBR.room.getMetadata();
+      const persistedSource = metadata[LOCAL_SESSION_METADATA_KEY];
+      if (isLocalSessionSource(persistedSource)) {
+        const source = identity.role === "GM" && persistedSource.ownerPlayerId === playerId
+          ? { ...persistedSource, ownerConnectionId: identity.connectionId } : persistedSource;
+        if (await isGmConnection(source.ownerConnectionId)) {
+          await localSession?.register(source);
+          if (source.ownerConnectionId === identity.connectionId) {
+            await OBR.room.setMetadata({ [LOCAL_SESSION_METADATA_KEY]: source });
+          }
+        }
+      }
       const persistedMusicState = metadata[MUSIC_ROOM_METADATA_KEY];
       if (isMusicState(persistedMusicState)) {
-        await acceptMusicState(persistedMusicState);
+        if (identity.role === "GM" && persistedMusicState.source?.ownerPlayerId === playerId &&
+          persistedMusicState.authorityConnectionId !== identity.connectionId &&
+          !(await isGmConnection(persistedMusicState.authorityConnectionId))) {
+          const now = Date.now();
+          const restored = createAuthorityTakeoverMusicState(persistedMusicState, identity.connectionId,
+            crypto.randomUUID(), now, now);
+          restored.source = localSession?.source ?? restored.source;
+          await publishMusicState(restored);
+        } else await acceptMusicState(persistedMusicState);
       }
     } catch (error) {
       console.warn(
@@ -841,11 +935,14 @@ async function initialize(): Promise<void> {
     }
   });
   OBR.player.onChange((player) => {
+    const sessionIdentityChanged = player.connectionId !== identity.connectionId || player.role !== identity.role ||
+      (player.role !== "GM" && localSession?.source?.ownerConnectionId === identity.connectionId);
     identity = {
       connectionId: player.connectionId,
       name: player.name,
       role: player.role,
     };
+    if (sessionIdentityChanged) void localSession?.reconnect().catch(() => {});
     void syncTool().catch((error: unknown) => {
       console.error("[cinematic-sync] Falha ao atualizar a Tool.", error);
     });
@@ -865,6 +962,7 @@ async function initialize(): Promise<void> {
   await musicHydrationPromise;
   await ensureInitialGmMusicState();
   await requestMusicState();
+  await OBR.broadcast.sendMessage(LOCAL_SESSION_CHANNEL, { kind: "HELLO" }, { destination: "ALL" });
   window.setInterval(() => {
     if (musicState) {
       musicPlayer?.reconcile(musicState);

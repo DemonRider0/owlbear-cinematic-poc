@@ -175,6 +175,21 @@ p {
   font-size: 12px;
 }
 
+.local-session-panel {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #5f6368;
+}
+
+.local-session-panel input[type="file"] { max-width: 100%; }
+.local-session-panel button { margin-top: 6px; }
+.local-session-panel pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
 ul {
   display: grid;
   gap: 8px;

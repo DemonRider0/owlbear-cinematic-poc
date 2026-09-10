@@ -58,6 +58,8 @@ Durante o desenvolvimento, cadastre `http://localhost:5173/manifest.json` no Owl
 
 Para validar o projeto completo, execute `npm run check`.
 
+Esta branch contém a POC `LOCAL_SESSION` de áudio local temporário. Consulte [arquitetura, limitações e roteiro de testes desktop/Android](LOCAL_SESSION_POC.md). O push da branch não publica a POC no GitHub Pages.
+
 ## Autor
 
 DemonRider

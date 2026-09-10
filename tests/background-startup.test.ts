@@ -22,6 +22,8 @@ const sdk = vi.hoisted(() => ({
   readyCallback: undefined as (() => void) | undefined,
   messageCallback: undefined as ((event: BroadcastEvent) => void) | undefined,
   storageCallback: undefined as ((event: StorageEvent) => void) | undefined,
+  localReady: false,
+  readinessChecked: vi.fn(),
 }));
 
 const media = vi.hoisted(() => ({
@@ -73,6 +75,16 @@ vi.mock("@owlbear-rodeo/sdk", () => ({
 
 vi.mock("../src/media-cache", () => ({
   preloadCinematic: media.preloadCinematic,
+}));
+
+vi.mock("../src/local-session", () => ({
+  LocalSession: class {
+    hasResolved = () => true;
+    allReady = async () => { sdk.readinessChecked(); return sdk.localReady; };
+    handle = async () => {};
+    tick = async () => {};
+    snapshot = () => ({ reports: {} });
+  },
 }));
 
 vi.mock("../src/music-player", () => ({
@@ -136,6 +148,7 @@ describe("background startup", () => {
     sdk.messageCallback = undefined;
     sdk.storageCallback = undefined;
     sdk.initialVolumes = undefined;
+    sdk.localReady = false;
     sdk.getPlayerId.mockResolvedValue("player-local");
     sdk.getRole.mockResolvedValue("GM");
     sdk.sendMessage.mockResolvedValue(undefined);
@@ -325,5 +338,35 @@ describe("background startup", () => {
     )?.[1]?.state;
     expect(rebroadcastState).not.toHaveProperty("musicVolume");
     expect(rebroadcastState).not.toHaveProperty("effectsVolume");
+  });
+
+  it("enforces LOCAL_SESSION READY in the background before publishing PLAY, but allows PAUSE", async () => {
+    media.preloadCinematic.mockResolvedValue({ bytes: 10, readyState: 3 });
+    await startBackground();
+    const paused = {
+      ...createInitialMusicState("gm-connection", "local-paused", Date.now() + 1_000),
+      source: { kind: "LOCAL_SESSION", sessionTrackId: "s", name: "Audio.ogg", size: 3,
+        mime: "audio/ogg", sha256: "a".repeat(64), durationSeconds: 60,
+        ownerConnectionId: "gm-connection", ownerPlayerId: "player-local" },
+    };
+    sdk.messageCallback?.({ connectionId: "gm-connection", data: {
+      version: PROTOCOL_VERSION, kind: "MUSIC_STATE", issuedAt: Date.now(), state: paused,
+    } });
+    await vi.waitFor(() => expect(sdk.applyMusicState).toHaveBeenCalledWith(paused));
+    sdk.setMetadata.mockClear(); sdk.sendMessage.mockClear();
+    const control = (type: string) => sdk.messageCallback?.({ connectionId: "gm-connection", data: {
+      version: PROTOCOL_VERSION, kind: "MUSIC_CONTROL", requestId: crypto.randomUUID(), issuedAt: Date.now(), action: { type },
+    } });
+    control("PLAY");
+    await vi.waitFor(() => expect(sdk.readinessChecked).toHaveBeenCalled());
+    expect(sdk.setMetadata).not.toHaveBeenCalled();
+    expect(sdk.sendMessage.mock.calls.some(([, message]) => message?.kind === "MUSIC_STATE" && message.state.playing)).toBe(false);
+    sdk.localReady = true;
+    control("PLAY");
+    await vi.waitFor(() => expect(sdk.setMetadata).toHaveBeenCalled());
+    expect(sdk.sendMessage.mock.calls.some(([, message]) => message?.kind === "MUSIC_STATE" && message.state.playing)).toBe(true);
+    sdk.localReady = false; sdk.setMetadata.mockClear();
+    control("PAUSE");
+    await vi.waitFor(() => expect(sdk.setMetadata).toHaveBeenCalled());
   });
 });

@@ -9,6 +9,7 @@ import {
   type EmfId,
   type MusicTrackId,
 } from "./config";
+import { isLocalSessionSource, type LocalSessionSource } from "./local-session-source";
 
 export const MUSIC_STATE_SCHEMA_VERSION = 1;
 
@@ -58,6 +59,7 @@ export interface EmfPlayback {
 }
 
 export interface MusicState {
+  source?: LocalSessionSource;
   schemaVersion: typeof MUSIC_STATE_SCHEMA_VERSION;
   stateId: string;
   revision: number;
@@ -75,6 +77,7 @@ export interface MusicState {
 }
 
 export type ManualMusicControlAction =
+  | { type: "SELECT_LOCAL_SESSION"; sessionTrackId: string }
   | { type: "PLAY" }
   | { type: "PAUSE" }
   | { type: "SEEK"; positionSeconds: number }
@@ -152,6 +155,7 @@ export function musicPositionAtGm(
     ? Math.max(0, gmTime - state.anchorAtGm) / 1_000
     : 0;
   const position = state.positionSeconds + elapsedSeconds;
+  if (state.source) return Math.min(state.source.durationSeconds, Math.max(0, position));
   return state.mode === "CINEMATIC"
     ? normalizeMusicMediaPosition(state.trackId, position)
     : normalizeMusicPosition(state.trackId, position);
@@ -252,9 +256,12 @@ export function createManualMusicState(
     positionSeconds: currentPosition,
     anchorAtGm: applyAtGm,
     gainTransition: current.gainTransition,
+    source: current.source,
   };
 
   switch (action.type) {
+    case "SELECT_LOCAL_SESSION":
+      throw new Error("A fonte local deve ser resolvida e validada antes da seleção.");
     case "PLAY":
       return { ...base, playing: true };
     case "PAUSE":
@@ -262,20 +269,21 @@ export function createManualMusicState(
     case "SEEK":
       return {
         ...base,
-        positionSeconds: normalizeMusicPosition(
+        positionSeconds: current.source ? Math.min(current.source.durationSeconds, action.positionSeconds) : normalizeMusicPosition(
           current.trackId,
           action.positionSeconds,
         ),
       };
     case "SELECT_TRACK": {
-      if (action.trackId === current.trackId) {
+      if (action.trackId === current.trackId && !current.source) {
         return base;
       }
       return {
         ...base,
         trackId: action.trackId,
+        source: undefined,
         positionSeconds: 0,
-        transition: current.playing
+        transition: current.playing && !current.source
           ? {
               kind: "TRACK_CROSSFADE",
               fromTrackId: current.trackId,
@@ -304,6 +312,7 @@ export function createEmfMusicState(
     authorityConnectionId,
     updatedAtGm: Math.max(issuedAtGm, current.updatedAtGm + 1),
     mode: "EMF",
+    source: current.source,
     trackId: current.trackId,
     playing: false,
     positionSeconds: musicPositionAtGm(current, applyAtGm),
@@ -533,6 +542,8 @@ export function isMusicControlAction(value: unknown): value is MusicControlActio
     return false;
   }
   switch (value.type) {
+    case "SELECT_LOCAL_SESSION":
+      return typeof value.sessionTrackId === "string" && /^[\w-]{1,128}$/.test(value.sessionTrackId);
     case "PLAY":
     case "PAUSE":
       return true;
@@ -689,6 +700,9 @@ export function isMusicState(value: unknown): value is MusicState {
   ) {
     return false;
   }
+
+  if (value.source !== undefined && (!isLocalSessionSource(value.source) ||
+    value.mode === "CINEMATIC" || value.transition !== undefined || value.positionSeconds > value.source.durationSeconds)) return false;
 
   if (value.transition !== undefined && !isMusicTransition(value.transition)) {
     return false;

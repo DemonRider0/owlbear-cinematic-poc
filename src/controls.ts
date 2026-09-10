@@ -1,4 +1,5 @@
 import OBR, { type Player } from "@owlbear-rodeo/sdk";
+import { mountLocalSessionUi } from "./local-session-ui";
 import {
   BROADCAST_CHANNEL,
   CINEMATIC_MUSIC_SYNC,
@@ -105,6 +106,7 @@ let musicState: MusicState | undefined;
 let sendingMusicCommand = false;
 let seekingMusic = false;
 let clientsReadyForMusic = false;
+let localSessionReady = false;
 let localPlayerId = "";
 let localVolumes: LocalAudioVolumes = {
   musicVolume: 1,
@@ -294,9 +296,10 @@ function renderMusic(): void {
     state === undefined ||
     sendingMusicCommand ||
     Boolean(activePlayRequestId) ||
-    !clientsReadyForMusic ||
+    (!state?.source && !clientsReadyForMusic) ||
     (state !== undefined && isCinematicMusicLocked(state, Date.now()));
   musicToggle.disabled = disabled;
+  if (state?.source && !state.playing && !localSessionReady) musicToggle.disabled = true;
   musicProgress.disabled = disabled;
   for (const button of musicTrackButtons) {
     button.disabled = disabled;
@@ -317,18 +320,19 @@ function renderMusic(): void {
   const position = musicPositionAtGm(state, now);
   const activeEmf = state.emf ? getEmfConfig(state.emf.id) : undefined;
   const emfPlaying = isEmfActive(state, now);
-  musicCurrent.textContent = track.label;
+  musicCurrent.textContent = state.source ? `${state.source.name} — Temporária` : track.label;
   musicToggle.textContent = state.playing ? "⏸" : "▶";
   musicToggle.setAttribute(
     "aria-label",
     state.playing ? "Pausar música" : "Reproduzir música",
   );
-  musicProgress.max = String(getMusicLoopCycleSeconds(track.id));
+  const duration = state.source?.durationSeconds ?? getMusicLoopCycleSeconds(track.id);
+  musicProgress.max = String(duration);
   if (!seekingMusic) {
     musicProgress.value = String(position);
     musicCurrentTime.textContent = formatTime(position);
   }
-  musicDuration.textContent = formatTime(getMusicLoopCycleSeconds(track.id));
+  musicDuration.textContent = formatTime(duration);
   musicStatus.textContent = !clientsReadyForMusic
     ? "Aguardando áudio e relógios dos clientes…"
     : sendingMusicCommand
@@ -342,7 +346,7 @@ function renderMusic(): void {
           : "Pausada em todos os clientes";
 
   for (const button of musicTrackButtons) {
-    const selected = button.dataset.trackId === state.trackId;
+    const selected = !state.source && button.dataset.trackId === state.trackId;
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-pressed", String(selected));
   }
@@ -511,7 +515,7 @@ async function sendMusicControl(action: MusicControlAction): Promise<void> {
   if (
     !musicState ||
     sendingMusicCommand ||
-    !clientsReadyForMusic ||
+    (!musicState.source && action.type !== "SELECT_LOCAL_SESSION" && !clientsReadyForMusic) ||
     isCinematicMusicLocked(musicState, Date.now()) ||
     (await OBR.player.getRole()) !== "GM"
   ) {
@@ -613,6 +617,10 @@ async function initialize(): Promise<void> {
     document.body.classList.remove("booting");
     return;
   }
+
+  mountLocalSessionUi(connectionId, playerId,
+    async (sessionTrackId) => { await sendMusicControl({ type: "SELECT_LOCAL_SESSION", sessionTrackId }); },
+    (ready) => { localSessionReady = ready; renderMusic(); });
 
   OBR.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
     if (!isProtocolMessage(event.data)) {

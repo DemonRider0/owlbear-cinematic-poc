@@ -16,6 +16,7 @@ import {
   musicGainAtGm,
 } from "../src/music-state";
 import type { LocalAudioVolumes } from "../src/local-audio-settings";
+import { sha256, type LocalSessionSource } from "../src/local-session-source";
 
 class FakeAudio extends EventTarget {
   static instances: FakeAudio[] = [];
@@ -40,6 +41,7 @@ class FakeAudio extends EventTarget {
   }
 
   load(): void {}
+  removeAttribute(): void { this.src = ""; }
 
   get currentTime(): number {
     return this.mediaTime;
@@ -86,6 +88,7 @@ describe("persistent music player", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -107,6 +110,133 @@ describe("persistent music player", () => {
     }
     return audio;
   }
+
+  it("plays resolved local audio on the existing clock with only local Trilhas volume, pause and seek", async () => {
+    const player = createPlayer({ musicVolume: 0.5, effectsVolume: 0.9 });
+    const blob = new Blob(["local audio"], { type: "audio/ogg" });
+    const source: LocalSessionSource = { kind: "LOCAL_SESSION", sessionTrackId: "local", name: "Local.ogg",
+      size: blob.size, sha256: await sha256(blob), mime: "audio/ogg", durationSeconds: 60,
+      ownerConnectionId: "gm-1", ownerPlayerId: "gm" };
+    const initial = { ...createInitialMusicState("gm-1", "local-paused", 1_000), source };
+    await player.setResolvedSource(source, blob);
+    player.applyState(initial);
+    const playing = createManualMusicState(initial, { type: "PLAY" }, "gm-1", "local-play", 1_000, 1_500);
+    player.applyState(playing);
+    const local = FakeAudio.instances.at(-1)!;
+    expect(local.paused).toBe(true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(local.paused).toBe(false);
+    expect(local.volume).toBe(0.5);
+    expect(audioAt(0).paused).toBe(true);
+    player.setLocalVolumes({ musicVolume: 0.5, effectsVolume: 0 });
+    expect(local.volume).toBe(0.5);
+    const seek = createManualMusicState(playing, { type: "SEEK", positionSeconds: 25 }, "gm-1", "local-seek", 1_500, 2_000);
+    player.applyState(seek);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(local.currentTime).toBe(25);
+    const pause = createManualMusicState(seek, { type: "PAUSE" }, "gm-1", "local-pause", 2_000, 2_500);
+    player.applyState(pause);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(local.paused).toBe(true);
+    expect(await sha256(blob)).toBe(source.sha256);
+    const builtin = createManualMusicState(pause, { type: "SELECT_TRACK", trackId: "o-porao" }, "gm-1", "builtin", 2_500, 2_500);
+    expect(builtin.source).toBeUndefined();
+    player.applyState(createManualMusicState(builtin, { type: "PLAY" }, "gm-1", "builtin-play", 2_500, 2_500));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(local.paused).toBe(true);
+    expect(audioAt(0).paused).toBe(false);
+    player.clearResolvedSource();
+    expect(local.src).toBe("");
+  });
+
+  it("joins current local playback using the GM offset and preserves cinematic and EMF exclusivity", async () => {
+    const blob = new Blob(["local audio"], { type: "audio/ogg" });
+    const source: LocalSessionSource = { kind: "LOCAL_SESSION", sessionTrackId: "local", name: "Local.ogg",
+      size: blob.size, sha256: await sha256(blob), mime: "audio/ogg", durationSeconds: 60,
+      ownerConnectionId: "gm-1", ownerPlayerId: "gm" };
+    const player = new MusicPlayer({ gmNow: () => Date.now() + 400, toLocalTime: (gmTime) => gmTime - 400 });
+    const playing = { ...createInitialMusicState("gm-1", "late", 500), source, playing: true, positionSeconds: 12, anchorAtGm: 500 };
+    await player.setResolvedSource(source, blob);
+    player.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+    const local = FakeAudio.instances.at(-1)!;
+    expect(local.currentTime).toBeCloseTo(12.9);
+    player.applyState(createEmfMusicState(playing, "emf-1", "gm-1", "emf", 1_400, 1_400));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(local.paused).toBe(true);
+    player.applyState({ ...playing, stateId: "again" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(local.paused).toBe(false);
+    player.applyState(createCinematicMusicState("gm-1", "cinematic", 10, 1_400, 2_000));
+    expect(local.paused).toBe(true);
+    player.clearResolvedSource();
+  });
+
+  it("does not reuse an audio element that failed preparation and cleans its object URL", async () => {
+    const player = createPlayer();
+    const blob = new Blob(["local audio"], { type: "audio/ogg" });
+    const source: LocalSessionSource = { kind: "LOCAL_SESSION", sessionTrackId: "retry", name: "Retry.ogg",
+      size: blob.size, sha256: await sha256(blob), mime: "audio/ogg", durationSeconds: 60,
+      ownerConnectionId: "gm-1", ownerPlayerId: "gm" };
+    const revoke = vi.spyOn(URL, "revokeObjectURL");
+    vi.spyOn(FakeAudio.prototype, "load").mockImplementation(function (this: FakeAudio) { this.readyState = 0; });
+    const first = player.setResolvedSource(source, blob);
+    const firstRejected = expect(first).rejects.toThrow("não preparou");
+    FakeAudio.instances.at(-1)!.dispatchEvent(new Event("error"));
+    await firstRejected;
+    expect(revoke).toHaveBeenCalledOnce();
+    const old = FakeAudio.instances.at(-1);
+    const retry = player.setResolvedSource(source, blob);
+    let ready = false;
+    void retry.then(() => { ready = true; });
+    await Promise.resolve();
+    expect(ready).toBe(false);
+    const fresh = FakeAudio.instances.at(-1)!;
+    expect(fresh).not.toBe(old);
+    fresh.readyState = 4; fresh.dispatchEvent(new Event("canplay"));
+    await retry;
+    player.clearResolvedSource();
+  });
+
+  it("keeps the current local track audible while another import is prepared, until its scheduled selection", async () => {
+    const player = createPlayer();
+    const blob = new Blob(["abc"], { type: "audio/ogg" });
+    const source: LocalSessionSource = { kind: "LOCAL_SESSION", sessionTrackId: "first", name: "First.ogg",
+      size: blob.size, sha256: await sha256(blob), mime: "audio/ogg", durationSeconds: 60,
+      ownerConnectionId: "gm-1", ownerPlayerId: "gm" };
+    const playing = { ...createInitialMusicState("gm-1", "first-play", 1_000), source, playing: true };
+    await player.setResolvedSource(source, blob);
+    player.applyState(playing);
+    await vi.advanceTimersByTimeAsync(0);
+    const first = FakeAudio.instances.at(-1)!;
+    const nextSource = { ...source, sessionTrackId: "second", name: "Second.ogg" };
+    await player.setResolvedSource(nextSource, blob);
+    const second = FakeAudio.instances.at(-1)!;
+    expect(first.paused).toBe(false);
+    expect(first.src).not.toBe("");
+    expect(second.paused).toBe(true);
+    player.setLocalVolumes({ musicVolume: 0.4, effectsVolume: 0 });
+    expect(first.volume).toBe(0.4);
+    player.applyState({ ...playing, stateId: "second-play", source: nextSource, anchorAtGm: 1_500 });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(first.paused).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(first.paused).toBe(true);
+    expect(first.src).toBe("");
+    expect(second.paused).toBe(false);
+    player.clearResolvedSource();
+  });
+
+  it("can play an incorporated EMF while the local track is still missing", async () => {
+    const player = createPlayer();
+    const source: LocalSessionSource = { kind: "LOCAL_SESSION", sessionTrackId: "missing", name: "Missing.ogg",
+      size: 3, sha256: "a".repeat(64), mime: "audio/ogg", durationSeconds: 60,
+      ownerConnectionId: "gm-1", ownerPlayerId: "gm" };
+    const pending = { ...createInitialMusicState("gm-1", "missing-state", 1_000), source };
+    player.applyState(createEmfMusicState(pending, "emf-1", "gm-1", "emf-without-local", 1_000, 1_000));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(audioAt(4).paused).toBe(false);
+  });
 
   it("starts O Porão audibly at local 100% even when shared legacy volume is zero", async () => {
     const player = createPlayer();
