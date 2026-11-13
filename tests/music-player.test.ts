@@ -317,30 +317,33 @@ describe("persistent music player", () => {
     expect(whatRemains.src).toBe("");
   });
 
-  it("rebuilds a nonzero seam on late join without restarting the other layer", async () => {
+  const lateJoinTracks = ["what-remains", "perseguicao-frenetica"] as const;
+
+  it.each(lateJoinTracks)("rebuilds the %s seam on late join without restarting the other layer", async (trackId) => {
     const player = createPlayer();
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
-    const first = issue(initial, { type: "ADD_TRACK", trackId: "what-remains" }, 1_500);
+    const first = issue(initial, { type: "ADD_TRACK", trackId }, 1_500);
     const second = issue(first, { type: "ADD_TRACK", trackId: "wildfire" }, 2_500);
     player.applyState(first);
     player.applyState(second);
-    const loop = getMusicLoop("what-remains");
-    await vi.advanceTimersByTimeAsync(500 + loop.seamSeconds * 1_000 + 120);
-    const original = trackVoices("what-remains");
+    const loop = getMusicLoop(trackId);
+    const phaseMs = Math.floor(loop.crossfadeSeconds * 500);
+    await vi.advanceTimersByTimeAsync(500 + Math.round(loop.seamSeconds * 1_000) + phaseMs);
+    const original = trackVoices(trackId);
     expect(original.every(({ paused }) => !paused)).toBe(true);
     const latePlayer = createPlayer();
     latePlayer.applyState(second);
     await vi.advanceTimersByTimeAsync(0);
-    const joined = trackVoices("what-remains").slice(2);
+    const joined = trackVoices(trackId).slice(2);
     expect(joined.every(({ paused }) => !paused)).toBe(true);
-    expect(joined[0]?.currentTime).toBeCloseTo(loop.seamSeconds + 0.12);
-    expect(joined[1]?.currentTime).toBeCloseTo(loop.startSeconds + 0.12);
-    expect(trackVoices("wildfire")[2]?.currentTime).toBeCloseTo(loop.seamSeconds - 0.88);
-    await vi.advanceTimersByTimeAsync(loop.crossfadeSeconds * 1_000);
+    expect(joined[0]?.currentTime).toBeCloseTo(loop.seamSeconds + phaseMs / 1_000);
+    expect(joined[1]?.currentTime).toBeCloseTo(loop.startSeconds + phaseMs / 1_000);
+    expect(trackVoices("wildfire")[2]?.currentTime).toBeCloseTo(loop.seamSeconds + phaseMs / 1_000 - 1);
+    await vi.advanceTimersByTimeAsync(loop.crossfadeSeconds * 1_000 + MUSIC_GAIN_STEP_MS);
     expect(joined.filter(({ paused }) => !paused)).toHaveLength(1);
     const other = trackVoices("wildfire")[2]!;
     const previous = { playCalls: other.playCalls, seekCalls: other.seekCalls };
-    const seek = issue(second, { type: "SEEK_LAYER", trackId: "what-remains", positionSeconds: 4 }, Date.now() + 500);
+    const seek = issue(second, { type: "SEEK_LAYER", trackId, positionSeconds: 4 }, Date.now() + 500);
     latePlayer.applyState(seek);
     await vi.advanceTimersByTimeAsync(500);
     expect(joined[1]?.currentTime).toBe(4);

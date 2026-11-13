@@ -195,7 +195,7 @@ const newTracks = [
   ["tensao-pressagio", 63.370, 34.230, 0.220],
   ["tensao-crescente", 70.720, 47.350, 0.240],
   ["tensao-ruptura", 40.570, 22.980, 0.240],
-  ["perseguicao-frenetica", 18.640, 10.900, 0.140],
+  ["perseguicao-frenetica", 12.366009, 8.510, 0.080],
 ] as const;
 
 describe("layered music assets", () => {
@@ -235,7 +235,8 @@ describe("layered music assets", () => {
     expect(loop.cycleSeconds).toBeGreaterThan(loop.crossfadeSeconds);
     expect(loop.endSeconds).toBeLessThanOrEqual(config.durationSeconds);
     const state = command(initial(), { type: "ADD_TRACK", trackId: id }, 1_000);
-    for (let cycle = 0; cycle < 4; cycle += 1) {
+    const cycles = id === "perseguicao-frenetica" ? 6 : 4;
+    for (let cycle = 0; cycle < cycles; cycle += 1) {
       const gmTime = 1_000 + (loop.seamSeconds + cycle * loop.cycleSeconds + 0.05) * 1_000;
       expect(musicLayerPositionAtGm(layer(state, id), gmTime)).toBeCloseTo(start + 0.05, 6);
     }

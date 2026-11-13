@@ -87,3 +87,15 @@ O FFprobe e a contagem de amostras confirmaram as durações. A simulação em P
 | Frenética | −3,6 | −16,4 | −4,8 | −5,3 |
 
 A musicalidade dos novos cortes ainda depende da escuta do GM.
+
+## Perseguição — Frenética na versão 1.2.1
+
+O GM percebeu a emenda do ciclo de 7,600 s da versão 1.2.0 durante a escuta. A nova edição mantém a abertura do MP3 e repete um motivo completo de cerca de 3,776 s. O OGG Vorbis estéreo a 44.100 Hz usa as primeiras 545.341 amostras do original, com o mesmo ganho de −3,6 dB e a mesma rampa de entrada de 8 ms.
+
+| Duração e saída (s) | Retorno (s) | Início do crossfade (s) | Crossfade (s) | Ciclo (s) |
+| ---: | ---: | ---: | ---: | ---: |
+| 12,366009 | 8,510 | 12,286009 | 0,080 | 3,776009 |
+
+O pulso agudo recorrente fica perto de 0,472 s. Nos sinais reconstruídos em PCM, o intervalo entre os ataques agudos que cercam a emenda passou de cerca de 0,503 s na edição publicada para 0,468 s. A nova sobreposição atravessa a cauda de dois ataques equivalentes, em torno de 8,424 e 12,201 s, e termina antes do próximo acento forte. As alternativas de dois e três motivos avaliadas tinham maior contraste nas notas sustentadas em torno da emenda. A frase mais curta preserva melhor essa textura, embora a repetição possa ficar reconhecível durante uma perseguição longa.
+
+O FFprobe confirmou a duração e o FFmpeg decodificou o OGG completo sem erro. Seis emendas foram simuladas em PCM com curva de potência constante e com os passos de ganho de 40 ms do player. Nenhuma amostra saturou e o pico verdadeiro ficou em −4,8 dBTP. Nos ciclos isolados, o loudness integrado passou de −15,5 para −15,7 LUFS. Na curva contínua, o maior salto entre amostras nas bordas da sobreposição passou de −20,62 para −22,49 dBFS. A simulação com atraso ou adiantamento de 20 ms entre as vozes mostrou sensibilidade ao alinhamento nos passos de ganho. A aprovação auditiva em sala fica com o GM.

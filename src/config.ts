@@ -110,10 +110,10 @@ export const MUSIC_TRACKS: readonly MusicTrackConfig[] = [
     id: "perseguicao-frenetica",
     label: "Perseguição — Frenética",
     url: "./assets/music/perseguicao-frenetica.ogg",
-    assetVersion: "v2",
-    durationSeconds: 18.640,
+    assetVersion: "v3",
+    durationSeconds: 12.366009,
     peak: 0.59,
-    loop: { startSeconds: 10.900, endSeconds: 18.640, crossfadeSeconds: 0.140 },
+    loop: { startSeconds: 8.510, endSeconds: 12.366009, crossfadeSeconds: 0.080 },
   },
   {
     id: "nightfire-ritual",
