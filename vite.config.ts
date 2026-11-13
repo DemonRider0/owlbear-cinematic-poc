@@ -18,6 +18,7 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
+        audioActivation: resolve(projectRoot, "audio-activation.html"),
         background: resolve(projectRoot, "background.html"),
         cinematic: resolve(projectRoot, "cinematic.html"),
         controls: resolve(projectRoot, "controls.html"),

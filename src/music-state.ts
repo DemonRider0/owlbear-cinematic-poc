@@ -2,15 +2,20 @@ import {
   CINEMATIC_OUTRO_MUSIC,
   CINEMATIC_MUSIC_SYNC,
   DEFAULT_MUSIC_TRACK_ID,
+  MUSIC_LAYER_FADE_MS,
+  MUSIC_MIX_RAMP_MS,
+  MUSIC_PAUSE_FADE_MS,
+  MUSIC_TRACKS,
   MUSIC_TRACK_CROSSFADE_MS,
   getEmfConfig,
-  getMusicLoopCycleSeconds,
+  getMusicLoop,
   getMusicTrackConfig,
   type EmfId,
   type MusicTrackId,
 } from "./config";
 
 export const MUSIC_STATE_SCHEMA_VERSION = 1;
+const LAYERED_MUSIC_SCHEMA_VERSION = 2;
 
 export type MusicMode = "MANUAL" | "CINEMATIC" | "EMF";
 
@@ -57,8 +62,23 @@ export interface EmfPlayback {
   durationSeconds: number;
 }
 
+export type MusicLayerStatus = "PLAYING" | "PAUSING" | "PAUSED" | "STOPPED" | "STOPPING";
+export type MusicMixVolumes = Partial<Record<MusicTrackId, number>>;
+
+export interface MusicLayer {
+  trackId: MusicTrackId;
+  status: MusicLayerStatus;
+  // Unwrapped transport position. This preserves whether the intro has
+  // already played and lets late clients reconstruct an in-progress seam.
+  positionSeconds: number;
+  anchorAtGm: number;
+  fade?: MusicGainTransition;
+  mixTransition?: MusicGainTransition;
+  waitingForTrackId?: MusicTrackId;
+}
+
 export interface MusicState {
-  schemaVersion: typeof MUSIC_STATE_SCHEMA_VERSION;
+  schemaVersion: typeof MUSIC_STATE_SCHEMA_VERSION | typeof LAYERED_MUSIC_SCHEMA_VERSION;
   stateId: string;
   revision: number;
   authorityConnectionId: string;
@@ -72,6 +92,8 @@ export interface MusicState {
   transition?: MusicTransition;
   cinematic?: CinematicMusicHandoff;
   emf?: EmfPlayback;
+  layers?: MusicLayer[];
+  mixVolumes?: MusicMixVolumes;
 }
 
 export type ManualMusicControlAction =
@@ -82,7 +104,17 @@ export type ManualMusicControlAction =
 
 export type MusicControlAction =
   | ManualMusicControlAction
+  | LayerMusicControlAction
   | { type: "PLAY_EMF"; emfId: EmfId };
+
+export type LayerMusicControlAction =
+  | { type: "ADD_TRACK" | "REPLACE_TRACK" | "PLAY_LAYER" | "PAUSE_LAYER" | "STOP_LAYER"; trackId: MusicTrackId }
+  | { type: "SEEK_LAYER"; trackId: MusicTrackId; positionSeconds: number }
+  | { type: "SET_MIX_VOLUME"; trackId: MusicTrackId; volume: number };
+
+export function isLayerMusicControlAction(action: MusicControlAction): action is LayerMusicControlAction {
+  return "trackId" in action && action.type !== "SELECT_TRACK";
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -107,7 +139,7 @@ export function stripLegacyVolumeFields(state: MusicState): MusicState {
 }
 
 export function isMusicTrackId(value: unknown): value is MusicTrackId {
-  return value === "o-porao" || value === "o-idolo";
+  return MUSIC_TRACKS.some(({ id }) => id === value);
 }
 
 export function isEmfId(value: unknown): value is EmfId {
@@ -118,9 +150,12 @@ export function normalizeMusicPosition(
   trackId: MusicTrackId,
   positionSeconds: number,
 ): number {
-  const cycleSeconds = getMusicLoopCycleSeconds(trackId);
-  const remainder = positionSeconds % cycleSeconds;
-  return remainder < 0 ? remainder + cycleSeconds : remainder;
+  const { startSeconds, seamSeconds, cycleSeconds } = getMusicLoop(trackId);
+  if (positionSeconds >= 0 && positionSeconds < seamSeconds) {
+    return positionSeconds;
+  }
+  const remainder = (positionSeconds - seamSeconds) % cycleSeconds;
+  return startSeconds + (remainder < 0 ? remainder + cycleSeconds : remainder);
 }
 
 export function normalizeMusicMediaPosition(
@@ -137,11 +172,9 @@ export function nextMusicLoopSeamAtGm(
   positionSeconds: number,
   positionAtGm: number,
 ): number {
-  const cycleSeconds = getMusicLoopCycleSeconds(trackId);
+  const { seamSeconds } = getMusicLoop(trackId);
   const normalized = normalizeMusicPosition(trackId, positionSeconds);
-  const secondsUntilSeam =
-    normalized === 0 ? cycleSeconds : cycleSeconds - normalized;
-  return positionAtGm + secondsUntilSeam * 1_000;
+  return positionAtGm + (seamSeconds - normalized) * 1_000;
 }
 
 export function musicPositionAtGm(
@@ -158,9 +191,17 @@ export function musicPositionAtGm(
 }
 
 export function musicGainAtGm(state: MusicState, gmTime: number): number {
-  const transition = state.gainTransition;
+  return gainAtGm(state.gainTransition, gmTime, getMusicMixVolume(state, state.trackId));
+}
+
+function gainAtGm(
+  transition: MusicGainTransition | undefined,
+  gmTime: number,
+  fallback: number,
+  equalPower = false,
+): number {
   if (!transition || gmTime >= transition.endAtGm) {
-    return transition?.toGain ?? 1;
+    return transition?.toGain ?? fallback;
   }
   if (gmTime <= transition.startAtGm) {
     return transition.fromGain;
@@ -168,11 +209,272 @@ export function musicGainAtGm(state: MusicState, gmTime: number): number {
   const progress =
     (gmTime - transition.startAtGm) /
     (transition.endAtGm - transition.startAtGm);
-  const smoothProgress = progress * progress * (3 - 2 * progress);
+  const smoothProgress = equalPower
+    ? transition.toGain >= transition.fromGain
+      ? Math.sin(progress * Math.PI / 2)
+      : 1 - Math.cos(progress * Math.PI / 2)
+    : progress * progress * (3 - 2 * progress);
   return (
     transition.fromGain +
     (transition.toGain - transition.fromGain) * smoothProgress
   );
+}
+
+export function getMusicMixVolume(state: MusicState, trackId: MusicTrackId): number {
+  return state.mixVolumes?.[trackId] ?? 1;
+}
+
+export function musicLayerStatusAtGm(layer: MusicLayer, gmTime: number): MusicLayerStatus {
+  if (layer.fade && gmTime >= layer.fade.endAtGm) {
+    if (layer.status === "PAUSING") return "PAUSED";
+    if (layer.status === "STOPPING") return "STOPPED";
+  }
+  return layer.status;
+}
+
+export function musicLayerIsPlaying(layer: MusicLayer, gmTime: number): boolean {
+  const status = musicLayerStatusAtGm(layer, gmTime);
+  return status === "PLAYING" || status === "STOPPING" || status === "PAUSING";
+}
+
+function musicLayerTransportPosition(layer: MusicLayer, gmTime: number): number {
+  if (musicLayerStatusAtGm(layer, gmTime) === "STOPPED") {
+    return 0;
+  }
+  // PAUSING keeps its original timeline, even in a persisted snapshot
+  // read long after the fade completed.
+  const positionAtGm = layer.status === "PAUSING" && layer.fade
+    ? Math.min(gmTime, layer.fade.endAtGm)
+    : gmTime;
+  return layer.positionSeconds + (musicLayerIsPlaying(layer, positionAtGm) || layer.status === "PAUSING"
+    ? Math.max(0, positionAtGm - layer.anchorAtGm) / 1_000
+    : 0);
+}
+
+export function musicLayerPositionAtGm(layer: MusicLayer, gmTime: number): number {
+  return normalizeMusicPosition(layer.trackId, musicLayerTransportPosition(layer, gmTime));
+}
+
+export function musicLayerMixAtGm(state: MusicState, layer: MusicLayer, gmTime: number): number {
+  return gainAtGm(layer.mixTransition, gmTime, getMusicMixVolume(state, layer.trackId));
+}
+
+export function musicLayerFadeAtGm(layer: MusicLayer, gmTime: number): number {
+  return gainAtGm(layer.fade, gmTime, 1, true);
+}
+
+function transitionGain(
+  startAtGm: number,
+  durationMs: number,
+  fromGain: number,
+  toGain: number,
+): MusicGainTransition {
+  return { startAtGm, endAtGm: startAtGm + durationMs, fromGain, toGain };
+}
+
+export function getMusicLayer(state: MusicState, trackId: MusicTrackId): MusicLayer | undefined {
+  if (state.mode === "CINEMATIC") {
+    return undefined;
+  }
+  if (state.layers) {
+    return state.layers.find((layer) => layer.trackId === trackId);
+  }
+  const transition = state.transition;
+  if (transition?.fromTrackId === trackId && state.playing) {
+    return {
+      trackId,
+      status: "STOPPING",
+      positionSeconds: transition.fromPositionSeconds,
+      anchorAtGm: transition.startAtGm,
+      fade: transitionGain(transition.startAtGm, transition.durationMs, 1, 0),
+    };
+  }
+  if (state.trackId !== trackId) {
+    return undefined;
+  }
+  return {
+    trackId,
+    status: state.playing ? "PLAYING" : state.revision === 0 ? "STOPPED" : "PAUSED",
+    positionSeconds: state.positionSeconds,
+    anchorAtGm: state.anchorAtGm,
+    fade: transition
+      ? transitionGain(transition.startAtGm, transition.durationMs, 0, 1)
+      : undefined,
+    mixTransition: state.gainTransition,
+  };
+}
+
+function pauseLayer(layer: MusicLayer, applyAtGm: number): MusicLayer {
+  return {
+    ...layer,
+    status: "PAUSED",
+    positionSeconds: musicLayerTransportPosition(layer, applyAtGm),
+    anchorAtGm: applyAtGm,
+    fade: undefined,
+    waitingForTrackId: undefined,
+  };
+}
+
+function stopLayer(
+  layer: MusicLayer, applyAtGm: number, fadeMs: number, waitingForTrackId?: MusicTrackId,
+): MusicLayer {
+  const status = musicLayerStatusAtGm(layer, applyAtGm);
+  if (status === "STOPPING" || status === "STOPPED") {
+    return layer;
+  }
+  const gain = musicLayerFadeAtGm(layer, applyAtGm);
+  if ((status === "PLAYING" || status === "PAUSING") && gain > 0) {
+    return {
+      ...layer,
+      status: "STOPPING",
+      fade: transitionGain(applyAtGm, fadeMs, gain, 0),
+      waitingForTrackId,
+    };
+  }
+  return {
+    ...layer,
+    status: "STOPPED",
+    positionSeconds: 0,
+    anchorAtGm: applyAtGm,
+    fade: undefined,
+    waitingForTrackId: undefined,
+  };
+}
+
+function startLayer(
+  layer: MusicLayer,
+  applyAtGm: number,
+  durationMs: number,
+  replace: boolean,
+): MusicLayer {
+  const status = musicLayerStatusAtGm(layer, applyAtGm);
+  if (status === "PLAYING") {
+    return layer;
+  }
+  const keepTimeline = status === "STOPPING" || status === "PAUSING";
+  return {
+    ...layer,
+    status: "PLAYING",
+    positionSeconds: keepTimeline ? layer.positionSeconds
+      : replace ? 0 : musicLayerTransportPosition(layer, applyAtGm),
+    anchorAtGm: keepTimeline ? layer.anchorAtGm : applyAtGm,
+    waitingForTrackId: undefined,
+    fade: transitionGain(
+      applyAtGm,
+      durationMs,
+      keepTimeline ? musicLayerFadeAtGm(layer, applyAtGm) : 0,
+      1,
+    ),
+  };
+}
+
+export function createLayeredMusicState(
+  current: MusicState,
+  action: LayerMusicControlAction,
+  authorityConnectionId: string,
+  stateId: string,
+  issuedAtGm: number,
+  applyAtGm: number,
+): MusicState {
+  const trackId = action.trackId;
+  const currentLayer = getMusicLayer(current, trackId);
+  const layer: MusicLayer = currentLayer ?? {
+    trackId,
+    status: "STOPPED",
+    positionSeconds: 0,
+    anchorAtGm: applyAtGm,
+  };
+  let next = layer;
+  let mixVolumes = current.mixVolumes;
+  const previousOtherLayers = MUSIC_TRACKS
+    .filter(({ id }) => id !== trackId)
+    .map(({ id }) => getMusicLayer(current, id))
+    .filter((entry): entry is MusicLayer => entry !== undefined);
+  let otherLayers = previousOtherLayers;
+  const status = musicLayerStatusAtGm(layer, applyAtGm);
+  switch (action.type) {
+    case "ADD_TRACK":
+      next = startLayer(layer, applyAtGm, MUSIC_LAYER_FADE_MS, false);
+      break;
+    case "PLAY_LAYER":
+      next = startLayer(
+        layer,
+        applyAtGm,
+        status === "PAUSED" || status === "PAUSING" ? MUSIC_PAUSE_FADE_MS : MUSIC_LAYER_FADE_MS,
+        false,
+      );
+      break;
+    case "REPLACE_TRACK":
+      next = startLayer(layer, applyAtGm, MUSIC_TRACK_CROSSFADE_MS, true);
+      otherLayers = otherLayers.map((entry) =>
+        stopLayer(entry, applyAtGm, MUSIC_TRACK_CROSSFADE_MS, next !== layer ? trackId : undefined),
+      );
+      break;
+    case "PAUSE_LAYER":
+      if (status === "PLAYING" || status === "STOPPING") {
+        next = {
+          ...layer,
+          status: "PAUSING",
+          fade: transitionGain(applyAtGm, MUSIC_PAUSE_FADE_MS, musicLayerFadeAtGm(layer, applyAtGm), 0),
+          waitingForTrackId: undefined,
+        };
+      }
+      break;
+    case "STOP_LAYER":
+      next = stopLayer(layer, applyAtGm, MUSIC_LAYER_FADE_MS);
+      break;
+    case "SEEK_LAYER": {
+      const { seamSeconds } = getMusicLoop(trackId);
+      next = {
+        ...layer,
+        status: status === "PLAYING" || status === "PAUSING" ? status : "PAUSED",
+        positionSeconds: Math.min(action.positionSeconds, seamSeconds - 0.001),
+        anchorAtGm: applyAtGm,
+        fade: status === "PLAYING" || status === "PAUSING" ? layer.fade : undefined,
+        waitingForTrackId: undefined,
+      };
+      break;
+    }
+    case "SET_MIX_VOLUME":
+      if (getMusicMixVolume(current, trackId) !== action.volume) {
+        mixVolumes = { ...mixVolumes, [trackId]: action.volume };
+        next = {
+          ...layer,
+          mixTransition: transitionGain(
+            applyAtGm,
+            MUSIC_MIX_RAMP_MS,
+            musicLayerMixAtGm(current, layer, applyAtGm),
+            action.volume,
+          ),
+        };
+      }
+      break;
+  }
+  if (
+    next === layer &&
+    otherLayers.every((entry, index) => entry === previousOtherLayers[index])
+  ) {
+    return current;
+  }
+  const layers = [...otherLayers, next];
+  // Volume edits leave an exclusive EMF playing on its original anchor.
+  const keepEmf = current.mode === "EMF" &&
+    action.type !== "ADD_TRACK" && action.type !== "REPLACE_TRACK" && action.type !== "PLAY_LAYER";
+  return {
+    schemaVersion: LAYERED_MUSIC_SCHEMA_VERSION,
+    stateId,
+    revision: current.revision + 1,
+    authorityConnectionId,
+    updatedAtGm: Math.max(issuedAtGm, current.updatedAtGm + 1),
+    mode: keepEmf ? "EMF" : "MANUAL",
+    trackId,
+    playing: !keepEmf && layers.some((entry) => musicLayerIsPlaying(entry, applyAtGm)),
+    positionSeconds: musicLayerPositionAtGm(next, applyAtGm),
+    anchorAtGm: applyAtGm,
+    emf: keepEmf ? current.emf : undefined,
+    mixVolumes,
+    layers,
+  };
 }
 
 export function emfPositionAtGm(
@@ -206,6 +508,9 @@ export function isCinematicMusicLocked(
 }
 
 export function compareMusicStates(left: MusicState, right: MusicState): number {
+  if (left.authorityConnectionId === right.authorityConnectionId && left.revision !== right.revision) {
+    return left.revision - right.revision;
+  }
   if (left.updatedAtGm !== right.updatedAtGm) {
     return left.updatedAtGm - right.updatedAtGm;
   }
@@ -252,6 +557,7 @@ export function createManualMusicState(
     positionSeconds: currentPosition,
     anchorAtGm: applyAtGm,
     gainTransition: current.gainTransition,
+    mixVolumes: current.mixVolumes,
   };
 
   switch (action.type) {
@@ -297,8 +603,22 @@ export function createEmfMusicState(
   issuedAtGm: number,
   applyAtGm: number,
 ): MusicState {
+  const layers = current.layers?.map((layer) => {
+    const status = musicLayerStatusAtGm(layer, applyAtGm);
+    if (status === "PLAYING" || status === "PAUSING" ||
+      (status === "PAUSED" && layer.status === "PAUSING")) {
+      return pauseLayer(layer, applyAtGm);
+    }
+    return status === "PAUSED" ? layer : {
+      ...layer,
+      status: "STOPPED" as const,
+      positionSeconds: 0,
+      fade: undefined,
+      waitingForTrackId: undefined,
+    };
+  });
   return {
-    schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
+    schemaVersion: current.schemaVersion,
     stateId,
     revision: current.revision + 1,
     authorityConnectionId,
@@ -308,6 +628,8 @@ export function createEmfMusicState(
     playing: false,
     positionSeconds: musicPositionAtGm(current, applyAtGm),
     anchorAtGm: applyAtGm,
+    mixVolumes: current.mixVolumes,
+    layers,
     emf: {
       id: emfId,
       startAtGm: applyAtGm,
@@ -322,6 +644,7 @@ export function createCinematicMusicState(
   revision: number,
   issuedAtGm: number,
   videoStartAtGm: number,
+  mixVolumes?: MusicMixVolumes,
 ): MusicState {
   const videoEndsAtGm =
     videoStartAtGm + CINEMATIC_MUSIC_SYNC.videoDurationSeconds * 1_000;
@@ -336,6 +659,7 @@ export function createCinematicMusicState(
     playing: true,
     positionSeconds: CINEMATIC_MUSIC_SYNC.playerPositionAtVideoStartSeconds,
     anchorAtGm: videoStartAtGm,
+    mixVolumes,
     gainTransition: {
       startAtGm:
         videoEndsAtGm - CINEMATIC_OUTRO_MUSIC.terminalGainRampMs,
@@ -388,6 +712,7 @@ export function createPostCinematicMusicState(
     throw new Error("Estado cinematic sem transição musical final.");
   }
   const closingGain = musicGainAtGm(current, handoff.videoEndsAtGm);
+  const mixVolume = getMusicMixVolume(current, outro.trackId);
 
   return {
     schemaVersion: MUSIC_STATE_SCHEMA_VERSION,
@@ -404,14 +729,15 @@ export function createPostCinematicMusicState(
         (handoff.videoEndsAtGm - outro.startAtGm) / 1_000,
     ),
     anchorAtGm: handoff.videoEndsAtGm,
+    mixVolumes: current.mixVolumes,
     gainTransition:
-      closingGain < 1 && (outro.normalizationMs ?? 0) > 0
+      closingGain !== mixVolume && (outro.normalizationMs ?? 0) > 0
         ? {
             startAtGm: handoff.videoEndsAtGm,
             endAtGm:
               handoff.videoEndsAtGm + (outro.normalizationMs ?? 0),
             fromGain: closingGain,
-            toGain: 1,
+            toGain: mixVolume,
           }
         : undefined,
   };
@@ -439,6 +765,7 @@ export function createAuthorityTakeoverMusicState(
     previousAuthorityNowGm >= handoff.videoEndsAtGm
   ) {
     const targetGain = musicGainAtGm(current, handoff.videoEndsAtGm);
+    const mixVolume = getMusicMixVolume(current, outro.trackId);
     const normalizationMs = outro.normalizationMs ?? 0;
     const gainTransitionEndsAtGm =
       handoff.videoEndsAtGm + normalizationMs;
@@ -458,21 +785,29 @@ export function createAuthorityTakeoverMusicState(
           Math.max(0, previousAuthorityNowGm - outro.startAtGm) / 1_000,
       ),
       anchorAtGm: newAuthorityNowGm,
+      mixVolumes: current.mixVolumes,
       gainTransition:
-        targetGain < 1 &&
+        targetGain !== mixVolume &&
         normalizationMs > 0 &&
         previousAuthorityNowGm < gainTransitionEndsAtGm
           ? {
               startAtGm: handoff.videoEndsAtGm + clockDeltaMs,
               endAtGm: gainTransitionEndsAtGm + clockDeltaMs,
               fromGain: targetGain,
-              toGain: 1,
+              toGain: mixVolume,
             }
           : undefined,
     };
   }
 
   const clockDeltaMs = newAuthorityNowGm - previousAuthorityNowGm;
+  const moveGain = (transition: MusicGainTransition | undefined) => transition
+    ? {
+        ...transition,
+        startAtGm: transition.startAtGm + clockDeltaMs,
+        endAtGm: transition.endAtGm + clockDeltaMs,
+      }
+    : undefined;
   return {
     ...stripLegacyVolumeFields(current),
     stateId,
@@ -480,13 +815,13 @@ export function createAuthorityTakeoverMusicState(
     authorityConnectionId,
     updatedAtGm,
     anchorAtGm: current.anchorAtGm + clockDeltaMs,
-    gainTransition: current.gainTransition
-      ? {
-          ...current.gainTransition,
-          startAtGm: current.gainTransition.startAtGm + clockDeltaMs,
-          endAtGm: current.gainTransition.endAtGm + clockDeltaMs,
-        }
-      : undefined,
+    gainTransition: moveGain(current.gainTransition),
+    layers: current.layers?.map((layer) => ({
+      ...layer,
+      anchorAtGm: layer.anchorAtGm + clockDeltaMs,
+      fade: moveGain(layer.fade),
+      mixTransition: moveGain(layer.mixTransition),
+    })),
     transition: current.transition
       ? {
           ...current.transition,
@@ -539,7 +874,17 @@ export function isMusicControlAction(value: unknown): value is MusicControlActio
     case "SEEK":
       return isFiniteNumber(value.positionSeconds) && value.positionSeconds >= 0;
     case "SELECT_TRACK":
+    case "ADD_TRACK":
+    case "REPLACE_TRACK":
+    case "PLAY_LAYER":
+    case "PAUSE_LAYER":
+    case "STOP_LAYER":
       return isMusicTrackId(value.trackId);
+    case "SEEK_LAYER":
+      return isMusicTrackId(value.trackId) &&
+        isFiniteNumber(value.positionSeconds) && value.positionSeconds >= 0;
+    case "SET_MIX_VOLUME":
+      return isMusicTrackId(value.trackId) && isUnitGain(value.volume);
     case "PLAY_EMF":
       return isEmfId(value.emfId);
     default:
@@ -570,18 +915,18 @@ function isMusicTransition(value: unknown): value is MusicTransition {
   );
 }
 
+function isUnitGain(value: unknown): value is number {
+  return isFiniteNumber(value) && value >= 0 && value <= 1;
+}
+
 function isMusicGainTransition(value: unknown): value is MusicGainTransition {
   return (
     isRecord(value) &&
     isFiniteNumber(value.startAtGm) &&
     isFiniteNumber(value.endAtGm) &&
     value.endAtGm > value.startAtGm &&
-    isFiniteNumber(value.fromGain) &&
-    value.fromGain >= 0 &&
-    value.fromGain <= 1 &&
-    isFiniteNumber(value.toGain) &&
-    value.toGain >= 0 &&
-    value.toGain <= 1
+    isUnitGain(value.fromGain) &&
+    isUnitGain(value.toGain)
   );
 }
 
@@ -669,12 +1014,52 @@ function isCinematicMusicOutro(value: unknown): value is CinematicMusicOutro {
   );
 }
 
+function isMusicLayer(value: unknown): value is MusicLayer {
+  return isRecord(value) &&
+    isMusicTrackId(value.trackId) &&
+    (value.status === "PLAYING" || value.status === "PAUSING" || value.status === "PAUSED" ||
+      value.status === "STOPPED" || value.status === "STOPPING") &&
+    isFiniteNumber(value.anchorAtGm) &&
+    isFiniteNumber(value.positionSeconds) && value.positionSeconds >= 0 &&
+    (value.fade === undefined || isMusicGainTransition(value.fade)) &&
+    ((value.status !== "STOPPING" && value.status !== "PAUSING") ||
+      (isMusicGainTransition(value.fade) && value.fade.toGain === 0)) &&
+    (value.waitingForTrackId === undefined ||
+      (value.status === "STOPPING" && isMusicTrackId(value.waitingForTrackId) && value.trackId !== value.waitingForTrackId)) &&
+    (value.mixTransition === undefined || isMusicGainTransition(value.mixTransition));
+}
+
+function isLayerSnapshot(value: Record<string, unknown>): boolean {
+  if (value.mixVolumes !== undefined && (
+    !isRecord(value.mixVolumes) || Array.isArray(value.mixVolumes) ||
+    !Object.entries(value.mixVolumes).every(([id, gain]) => isMusicTrackId(id) && isUnitGain(gain))
+  )) {
+    return false;
+  }
+  if (value.schemaVersion === MUSIC_STATE_SCHEMA_VERSION) {
+    return value.layers === undefined;
+  }
+  const { layers, anchorAtGm } = value;
+  if (value.mode === "CINEMATIC" || value.transition !== undefined || value.gainTransition !== undefined ||
+    !isFiniteNumber(anchorAtGm) || !Array.isArray(layers) || layers.length > MUSIC_TRACKS.length ||
+    !layers.every(isMusicLayer)) {
+    return false;
+  }
+  const ids = new Set(layers.map(({ trackId }) => trackId));
+  return isMusicTrackId(value.trackId) && ids.has(value.trackId) && ids.size === layers.length &&
+    layers.every(({ anchorAtGm: layerAnchor, waitingForTrackId }) =>
+      layerAnchor <= anchorAtGm && (waitingForTrackId === undefined || ids.has(waitingForTrackId)),
+    ) &&
+    value.playing === layers.some((layer) => musicLayerIsPlaying(layer, anchorAtGm)) &&
+    (value.mode !== "EMF" || layers.every(({ status }) => status === "PAUSED" || status === "STOPPED"));
+}
+
 export function isMusicState(value: unknown): value is MusicState {
   if (
     !isRecord(value) ||
-    value.schemaVersion !== MUSIC_STATE_SCHEMA_VERSION ||
+    (value.schemaVersion !== MUSIC_STATE_SCHEMA_VERSION && value.schemaVersion !== LAYERED_MUSIC_SCHEMA_VERSION) ||
     !isNonEmptyString(value.stateId) ||
-    !Number.isInteger(value.revision) ||
+    !Number.isSafeInteger(value.revision) ||
     Number(value.revision) < 0 ||
     !isNonEmptyString(value.authorityConnectionId) ||
     !isFiniteNumber(value.updatedAtGm) ||
@@ -703,6 +1088,9 @@ export function isMusicState(value: unknown): value is MusicState {
     return false;
   }
   if (value.emf !== undefined && !isEmfPlayback(value.emf)) {
+    return false;
+  }
+  if (!isLayerSnapshot(value)) {
     return false;
   }
   return (

@@ -1,6 +1,8 @@
 import OBR, { type Player } from "@owlbear-rodeo/sdk";
 import { calculateClockSample, calculateLocalStartAt } from "./clock-sync";
 import {
+  AUDIO_ACTIVATION_CHANNEL,
+  AUDIO_ACTIVATION_POPOVER_ID,
   BROADCAST_CHANNEL,
   CINEMATIC_MODAL_ID,
   CLOCK_SYNC_SAMPLE_COUNT,
@@ -17,6 +19,7 @@ import { toSerializableError } from "./errors";
 import { preloadCinematic } from "./media-cache";
 import { MusicPlayer } from "./music-player";
 import {
+  DEFAULT_LOCAL_AUDIO_VOLUMES,
   loadLocalAudioVolumes,
   localAudioStorageKey,
   parseLocalAudioVolumes,
@@ -26,10 +29,13 @@ import {
   createAuthorityTakeoverMusicState,
   createEmfMusicState,
   createInitialMusicState,
+  createLayeredMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
   isCinematicMusicLocked,
+  isLayerMusicControlAction,
   isMusicState,
+  type LayerMusicControlAction,
   stripLegacyVolumeFields,
   type MusicState,
 } from "./music-state";
@@ -42,6 +48,7 @@ import {
   type ClockPingMessage,
   type ClockPongMessage,
   type MusicControlMessage,
+  type MusicPlaybackStatus,
   type MusicStateMessage,
   type MusicStateRequestMessage,
   type PlayMessage,
@@ -62,12 +69,14 @@ interface LocalIdentity {
 let identity: LocalIdentity;
 let partyPlayers: Player[] = [];
 let phase: ClientPhase = "LOADING";
-let diagnostics: ClientDiagnostics = { userAgent: navigator.userAgent };
+let diagnostics: ClientDiagnostics = { userAgent: navigator.userAgent, musicPlayback: "IDLE" };
 let activeRequestId: string | undefined;
 let toolRegistered = false;
 let clockDiagnostics: ClockDiagnostics | undefined;
+let playbackClock: { gmConnectionId: string; offsetGmMinusLocalMs: number } | undefined;
 let clockSyncGeneration = 0;
 let clockSyncTarget: string | undefined;
+let clockSyncStartedAt = 0;
 let preferredGmConnectionId: string | undefined;
 let validClockSamples = 0;
 let musicPlayer: MusicPlayer | undefined;
@@ -75,7 +84,19 @@ let musicState: MusicState | undefined;
 let musicHydrationPromise: Promise<void> | undefined;
 let cinematicCompletionTimer: number | undefined;
 let finalizingCinematicStateId: string | undefined;
+let pendingGmCommand = Promise.resolve();
+let pendingMusicPersistence = Promise.resolve();
+let latestMusicCommandIssuedAt = Number.NEGATIVE_INFINITY;
+let activationOffered = false;
+let activationPopoverOperation = Promise.resolve();
+const handledMusicRequests = new Set<string>();
 const pendingClockPings = new Map<string, number>();
+
+function queueGmCommand(run: () => Promise<void>): Promise<void> {
+  const command = pendingGmCommand.then(run);
+  pendingGmCommand = command.catch(() => undefined);
+  return command;
+}
 
 function mergeDiagnostics(
   current: ClientDiagnostics,
@@ -152,22 +173,87 @@ async function syncTool(): Promise<void> {
         },
       ],
       async onClick(_context, elementId) {
-        const role = await OBR.player.getRole();
-
-        await OBR.popover.open({
-          id: CONTROL_POPOVER_ID,
-          url: resolveAppUrl("./controls.html"),
-          width: 380,
-          height: role === "GM" ? 720 : 260,
-          anchorElementId: elementId,
-          anchorOrigin: { horizontal: "LEFT", vertical: "CENTER" },
-          transformOrigin: { horizontal: "RIGHT", vertical: "CENTER" },
-        });
+        if (activationOffered) {
+          await openAudioActivation(elementId);
+          return false;
+        }
+        await openControls(elementId);
         return false;
       },
     });
     toolRegistered = true;
   }
+}
+
+async function openControls(elementId?: string): Promise<void> {
+  const role = await OBR.player.getRole();
+  await OBR.popover.open({
+    id: CONTROL_POPOVER_ID,
+    url: resolveAppUrl("./controls.html"),
+    width: 380,
+    height: role === "GM" ? 720 : 260,
+    ...(elementId ? {
+      anchorElementId: elementId,
+      anchorOrigin: { horizontal: "LEFT" as const, vertical: "CENTER" as const },
+      transformOrigin: { horizontal: "RIGHT" as const, vertical: "CENTER" as const },
+    } : {
+      anchorReference: "POSITION" as const,
+      anchorPosition: { left: 16, top: 80 },
+      transformOrigin: { horizontal: "LEFT" as const, vertical: "TOP" as const },
+    }),
+  });
+}
+
+function openAudioActivation(elementId?: string): Promise<void> {
+  return OBR.popover.open({
+    id: AUDIO_ACTIVATION_POPOVER_ID,
+    url: resolveAppUrl("./audio-activation.html"),
+    width: 300,
+    height: 194,
+    ...(elementId ? { anchorElementId: elementId } : {
+      anchorReference: "POSITION" as const,
+      anchorPosition: { left: 16, top: 80 },
+    }),
+    anchorOrigin: { horizontal: "LEFT", vertical: "TOP" },
+    transformOrigin: { horizontal: "LEFT", vertical: "TOP" },
+  });
+}
+
+function reportMusicPlayback(status: MusicPlaybackStatus): void {
+  diagnostics = { ...diagnostics, musicPlayback: status };
+  void sendStatus().catch((error: unknown) => {
+    console.warn("[cinematic-sync] Diagnóstico de áudio indisponível.", error);
+  });
+  if (status === "BLOCKED" && !activationOffered) {
+    activationOffered = true;
+    activationPopoverOperation = activationPopoverOperation.then(async () => {
+      if (!activationOffered) return;
+      try {
+        await openAudioActivation();
+      } catch {
+        await OBR.notification.show(
+          "O navegador bloqueou a trilha. Abra Cinemática e escolha Ativar áudio.",
+          "WARNING",
+        );
+      }
+    }).catch((error: unknown) => {
+      console.warn("[cinematic-sync] Aviso de autoplay indisponível.", error);
+    });
+  } else if (status !== "BLOCKED" && status !== "STARTING" && activationOffered) {
+    activationOffered = false;
+    activationPopoverOperation = activationPopoverOperation.then(async () => {
+      await OBR.popover.close(AUDIO_ACTIVATION_POPOVER_ID);
+    }).catch((error: unknown) => {
+      console.warn("[cinematic-sync] Não foi possível fechar a ativação de áudio.", error);
+    });
+  }
+}
+
+function resetClockSync(): void {
+  clockSyncTarget = undefined;
+  clockDiagnostics = undefined;
+  clockSyncGeneration += 1;
+  pendingClockPings.clear();
 }
 
 function beginClockSyncIfNeeded(preferredConnectionId?: string): void {
@@ -189,12 +275,12 @@ function beginClockSyncIfNeeded(preferredConnectionId?: string): void {
         : partyPlayers.find((player) => player.role === "GM")?.connectionId));
 
   if (!targetConnectionId) {
-    clockSyncTarget = undefined;
-    clockDiagnostics = undefined;
+    resetClockSync();
     return;
   }
 
   if (targetConnectionId === identity.connectionId) {
+    if (clockSyncTarget !== targetConnectionId) resetClockSync();
     clockSyncTarget = targetConnectionId;
     clockDiagnostics = {
       gmConnectionId: identity.connectionId,
@@ -202,15 +288,16 @@ function beginClockSyncIfNeeded(preferredConnectionId?: string): void {
       roundTripMs: 0,
       samples: CLOCK_SYNC_SAMPLE_COUNT,
     };
-    applyMusicStateIfClockReady();
     return;
   }
 
-  if (clockSyncTarget === targetConnectionId && clockDiagnostics) {
+  if (clockSyncTarget === targetConnectionId &&
+    (clockDiagnostics || Date.now() - clockSyncStartedAt < 2_000)) {
     return;
   }
 
   clockSyncTarget = targetConnectionId;
+  clockSyncStartedAt = Date.now();
   clockDiagnostics = undefined;
   validClockSamples = 0;
   pendingClockPings.clear();
@@ -262,15 +349,17 @@ async function handleClockPong(
   message: ClockPongMessage,
   senderConnectionId: string,
 ): Promise<void> {
-  if (message.targetConnectionId !== identity.connectionId) {
+  if (message.targetConnectionId !== identity.connectionId || senderConnectionId !== clockSyncTarget) {
     return;
   }
 
   const originalSentAt = pendingClockPings.get(message.nonce);
+  const generation = clockSyncGeneration;
   if (
     originalSentAt === undefined ||
     originalSentAt !== message.clientSentAt ||
-    !(await isGmConnection(senderConnectionId))
+    !(await isGmConnection(senderConnectionId)) ||
+    generation !== clockSyncGeneration
   ) {
     return;
   }
@@ -295,8 +384,8 @@ async function handleClockPong(
     clockDiagnostics = { ...clockDiagnostics, samples: validClockSamples };
   }
 
-  await sendStatus();
   applyMusicStateIfClockReady();
+  await sendStatus();
 }
 
 function musicClockReady(state: MusicState): boolean {
@@ -306,31 +395,34 @@ function musicClockReady(state: MusicState): boolean {
   );
 }
 
-function gmNowForMusic(): number {
-  const authorityConnectionId = musicState?.authorityConnectionId;
-  const offset =
-    authorityConnectionId &&
-    authorityConnectionId !== identity.connectionId &&
-    clockDiagnostics?.gmConnectionId === authorityConnectionId
-      ? clockDiagnostics.offsetGmMinusLocalMs
-      : 0;
-  return Date.now() + offset;
+function musicClockOffset(authorityConnectionId: string | undefined): number | undefined {
+  if (authorityConnectionId === undefined) return undefined;
+  if (authorityConnectionId === identity.connectionId) return 0;
+  if (clockDiagnostics?.gmConnectionId === authorityConnectionId) {
+    return clockDiagnostics.offsetGmMinusLocalMs;
+  }
+  // Keep the last usable clock for already-scheduled fades and loops while
+  // reconnecting. New snapshots still require a current clock sample.
+  if (playbackClock?.gmConnectionId === authorityConnectionId) {
+    return playbackClock.offsetGmMinusLocalMs;
+  }
+}
+
+function gmNowForMusic(authority = playbackClock?.gmConnectionId ?? musicState?.authorityConnectionId): number {
+  return Date.now() + (musicClockOffset(authority) ?? 0);
 }
 
 function localTimeForMusic(gmTime: number, issuedAtGm: number): number {
-  const authorityConnectionId = musicState?.authorityConnectionId;
-  const offset =
-    authorityConnectionId &&
-    clockDiagnostics?.gmConnectionId === authorityConnectionId
-      ? clockDiagnostics.offsetGmMinusLocalMs
-      : authorityConnectionId === identity.connectionId
-        ? 0
-        : undefined;
+  const offset = musicClockOffset(playbackClock?.gmConnectionId ?? musicState?.authorityConnectionId);
   return calculateLocalStartAt(gmTime, issuedAtGm, Date.now(), offset);
 }
 
 function applyMusicStateIfClockReady(): void {
   if (musicState && musicPlayer && musicClockReady(musicState)) {
+    playbackClock = {
+      gmConnectionId: musicState.authorityConnectionId,
+      offsetGmMinusLocalMs: musicClockOffset(musicState.authorityConnectionId) ?? 0,
+    };
     musicPlayer.applyState(musicState);
   }
 }
@@ -367,16 +459,21 @@ async function acceptMusicState(
   return true;
 }
 
-async function persistMusicState(state: MusicState): Promise<void> {
-  if (
-    identity.role !== "GM" ||
-    state.authorityConnectionId !== identity.connectionId
-  ) {
-    return;
-  }
-  await OBR.room.setMetadata({
-    [MUSIC_ROOM_METADATA_KEY]: stripLegacyVolumeFields(state),
+function persistMusicState(state: MusicState): Promise<void> {
+  const write = pendingMusicPersistence.then(async () => {
+    if (
+      identity.role !== "GM" ||
+      state.authorityConnectionId !== identity.connectionId ||
+      musicState?.stateId !== state.stateId
+    ) {
+      return;
+    }
+    await OBR.room.setMetadata({
+      [MUSIC_ROOM_METADATA_KEY]: stripLegacyVolumeFields(state),
+    });
   });
+  pendingMusicPersistence = write.catch(() => undefined);
+  return write;
 }
 
 async function broadcastMusicState(
@@ -405,15 +502,16 @@ async function publishMusicState(
   if (!accepted) {
     return;
   }
-  const results = await Promise.allSettled([
+  void Promise.allSettled([
     persistMusicState(state),
     broadcastMusicState(state, requestId),
-  ]);
-  for (const result of results) {
-    if (result.status === "rejected") {
-      console.error("[cinematic-sync] Falha ao publicar estado musical.", result.reason);
+  ]).then((results) => {
+    for (const result of results) {
+      if (result.status === "rejected") {
+        console.error("[cinematic-sync] Falha ao publicar estado musical.", result.reason);
+      }
     }
-  }
+  });
 }
 
 function scheduleCinematicMusicCompletion(state: MusicState): void {
@@ -434,7 +532,9 @@ function scheduleCinematicMusicCompletion(state: MusicState): void {
   const delay = Math.max(0, state.cinematic.videoEndsAtGm - Date.now());
   cinematicCompletionTimer = window.setTimeout(() => {
     cinematicCompletionTimer = undefined;
-    void finalizeExpiredCinematicMusicState(expectedStateId).catch(
+    void queueGmCommand(async () => {
+      await finalizeExpiredCinematicMusicState(expectedStateId);
+    }).catch(
       (error: unknown) => {
         console.error(
           "[cinematic-sync] Falha ao concluir estado musical da cinemática.",
@@ -482,18 +582,20 @@ async function ensureInitialGmMusicState(): Promise<void> {
     return;
   }
   await finalizeExpiredCinematicMusicState();
-  if (musicState) {
+  const current = musicState;
+  if (current) {
     if (
-      musicState.authorityConnectionId === identity.connectionId ||
-      (await isGmConnection(musicState.authorityConnectionId))
+      current.authorityConnectionId === identity.connectionId ||
+      (await isGmConnection(current.authorityConnectionId)) ||
+      musicState !== current
     ) {
       return;
     }
 
-    const previousAuthorityNowGm = gmNowForMusic();
+    const previousAuthorityNowGm = gmNowForMusic(current.authorityConnectionId);
     const nowGm = Date.now();
     const takeover = createAuthorityTakeoverMusicState(
-      musicState,
+      current,
       identity.connectionId,
       crypto.randomUUID(),
       previousAuthorityNowGm,
@@ -529,12 +631,22 @@ async function handleMusicControl(
   }
 
   await ensureInitialGmMusicState();
-  if (!musicState) {
+  if (!musicState || musicState.authorityConnectionId !== identity.connectionId) {
     return;
   }
   await finalizeExpiredCinematicMusicState();
   if (!musicState) {
     return;
+  }
+  if (handledMusicRequests.has(message.requestId) || message.issuedAt <= latestMusicCommandIssuedAt) {
+    await broadcastMusicState(musicState, message.requestId, senderConnectionId);
+    return;
+  }
+  latestMusicCommandIssuedAt = message.issuedAt;
+  handledMusicRequests.add(message.requestId);
+  if (handledMusicRequests.size > 256) {
+    const oldest = handledMusicRequests.values().next().value;
+    if (oldest !== undefined) handledMusicRequests.delete(oldest);
   }
   const issuedAtGm = Date.now();
   if (isCinematicMusicLocked(musicState, issuedAtGm)) {
@@ -542,26 +654,44 @@ async function handleMusicControl(
     return;
   }
   const stateId = crypto.randomUUID();
-  const applyAtGm = issuedAtGm + MUSIC_COMMAND_DELAY_MS;
-  const next =
-    message.action.type === "PLAY_EMF"
-      ? createEmfMusicState(
-          musicState,
-          message.action.emfId,
-          identity.connectionId,
-          stateId,
-          issuedAtGm,
-          applyAtGm,
-        )
-      : createManualMusicState(
-          musicState,
-          message.action,
-          identity.connectionId,
-          stateId,
-          issuedAtGm,
-          applyAtGm,
-        );
+  const applyAtGm = Math.max(issuedAtGm + MUSIC_COMMAND_DELAY_MS, musicState.anchorAtGm + 1);
+  const next = applyMusicControl(musicState, message.action, stateId, issuedAtGm, applyAtGm);
+  if (next === musicState) {
+    await broadcastMusicState(musicState, message.requestId, senderConnectionId);
+    return;
+  }
   await publishMusicState(next, message.requestId);
+}
+
+function applyMusicControl(
+  state: MusicState, action: MusicControlMessage["action"], stateId: string, issuedAtGm: number, applyAtGm: number,
+): MusicState {
+  const authority = identity.connectionId;
+  if (action.type === "PLAY_EMF") {
+    return createEmfMusicState(state, action.emfId, authority, stateId, issuedAtGm, applyAtGm);
+  }
+  if (isLayerMusicControlAction(action)) {
+    return createLayeredMusicState(state, action, authority, stateId, issuedAtGm, applyAtGm);
+  }
+  if (!state.layers) {
+    return createManualMusicState(state, action, authority, stateId, issuedAtGm, applyAtGm);
+  }
+  let layeredAction: LayerMusicControlAction;
+  switch (action.type) {
+    case "SELECT_TRACK":
+      layeredAction = state.playing
+        ? { type: "REPLACE_TRACK", trackId: action.trackId }
+        : { type: "SEEK_LAYER", trackId: action.trackId, positionSeconds: 0 };
+      break;
+    case "SEEK":
+      layeredAction = { type: "SEEK_LAYER", trackId: state.trackId, positionSeconds: action.positionSeconds };
+      break;
+    case "PLAY":
+    case "PAUSE":
+      layeredAction = { type: action.type === "PLAY" ? "PLAY_LAYER" : "PAUSE_LAYER", trackId: state.trackId };
+      break;
+  }
+  return createLayeredMusicState(state, layeredAction, authority, stateId, issuedAtGm, applyAtGm);
 }
 
 async function handleMusicStateRequest(
@@ -572,7 +702,7 @@ async function handleMusicStateRequest(
   if (identity.role !== "GM") {
     return;
   }
-  await ensureInitialGmMusicState();
+  await queueGmCommand(ensureInitialGmMusicState);
   if (musicState) {
     if (musicState.authorityConnectionId !== identity.connectionId) {
       return;
@@ -692,42 +822,16 @@ async function handleProtocolEvent(event: {
       }
       break;
     case "PLAY":
-      if (await isGmConnection(event.connectionId)) {
-        await musicHydrationPromise;
-        const accepted = await acceptMusicState(
-          message.musicState,
-          event.connectionId,
-        );
-        const alreadyCurrent =
-          musicState?.stateId === message.musicState.stateId;
-        if (!accepted && !alreadyCurrent) {
-          console.warn(
-            `[cinematic-sync] PLAY stale ignorado (${message.requestId}).`,
-          );
-          break;
-        }
-        if (
-          accepted &&
-          message.musicState.authorityConnectionId === identity.connectionId
-        ) {
-          void persistMusicState(
-            stripLegacyVolumeFields(message.musicState),
-          ).catch((error: unknown) => {
-            console.error(
-              "[cinematic-sync] Falha ao persistir handoff musical.",
-              error,
-            );
-          });
-        }
-        await openCinematic(message, event.connectionId);
+      if (event.connectionId === identity.connectionId) {
+        await queueGmCommand(() => handleCinematicPlay(message, event.connectionId));
       } else {
-        console.warn(
-          `[cinematic-sync] PLAY não autorizado ignorado (${event.connectionId}).`,
-        );
+        await handleCinematicPlay(message, event.connectionId);
       }
       break;
     case "MUSIC_CONTROL":
-      await handleMusicControl(message, event.connectionId);
+      if (event.connectionId === identity.connectionId) {
+        await queueGmCommand(() => handleMusicControl(message, event.connectionId));
+      }
       break;
     case "MUSIC_STATE":
       await handleMusicStateMessage(message, event.connectionId);
@@ -749,6 +853,21 @@ async function handleProtocolEvent(event: {
   }
 }
 
+async function handleCinematicPlay(message: PlayMessage, sender: string): Promise<void> {
+  await musicHydrationPromise;
+  const accepted = await acceptMusicState(message.musicState, sender);
+  if (!accepted && (musicState?.stateId !== message.musicState.stateId ||
+    musicState.authorityConnectionId !== sender || !(await isGmConnection(sender)))) {
+    return;
+  }
+  if (accepted && sender === identity.connectionId) {
+    void persistMusicState(message.musicState).catch((error: unknown) => {
+      console.error("[cinematic-sync] Falha ao persistir handoff musical.", error);
+    });
+  }
+  await openCinematic(message, sender);
+}
+
 async function requestMusicState(): Promise<void> {
   const message = protocolMessage<MusicStateRequestMessage>({
     kind: "MUSIC_STATE_REQUEST",
@@ -758,6 +877,28 @@ async function requestMusicState(): Promise<void> {
   await OBR.broadcast.sendMessage(BROADCAST_CHANNEL, message, {
     destination: "ALL",
   });
+}
+
+function recoverMusicState(): void {
+  beginClockSyncIfNeeded(musicState?.authorityConnectionId);
+  void requestMusicState().catch((error: unknown) => {
+    console.warn("[cinematic-sync] Não foi possível solicitar o estado musical.", error);
+  });
+}
+
+function recoverMusicAfterReconnect(): void {
+  recoverMusicState();
+  void refreshParty().catch((error: unknown) => {
+    console.warn("[cinematic-sync] Participantes indisponíveis após reconexão.", error);
+  });
+}
+
+function localVolumesForPlayer(playerId: string) {
+  try {
+    return loadLocalAudioVolumes(localStorage, playerId);
+  } catch {
+    return DEFAULT_LOCAL_AUDIO_VOLUMES;
+  }
 }
 
 async function runPreload(): Promise<void> {
@@ -782,21 +923,20 @@ async function runPreload(): Promise<void> {
 }
 
 async function initialize(): Promise<void> {
-  const [connectionId, playerId, name, role, players] = await Promise.all([
+  const [connectionId, playerId, name, role] = await Promise.all([
     OBR.player.getConnectionId(),
     OBR.player.getId(),
     OBR.player.getName(),
     OBR.player.getRole(),
-    OBR.party.getPlayers(),
   ]);
   identity = { connectionId, name, role };
-  partyPlayers = players.filter((player) => player.connectionId !== connectionId);
   musicPlayer = new MusicPlayer(
     {
       gmNow: gmNowForMusic,
       toLocalTime: localTimeForMusic,
     },
-    loadLocalAudioVolumes(localStorage, playerId),
+    localVolumesForPlayer(playerId),
+    reportMusicPlayback,
   );
   const volumeStorageKey = localAudioStorageKey(playerId);
   window.addEventListener("storage", (event) => {
@@ -809,7 +949,14 @@ async function initialize(): Promise<void> {
       const metadata = await OBR.room.getMetadata();
       const persistedMusicState = metadata[MUSIC_ROOM_METADATA_KEY];
       if (isMusicState(persistedMusicState)) {
-        await acceptMusicState(persistedMusicState);
+        const accepted = await acceptMusicState(persistedMusicState);
+        // A reload creates a new connection. Keep the last valid snapshot as
+        // the takeover base if the previous GM connection has already left.
+        if (!accepted && !musicState && identity.role === "GM" &&
+          (await roleForConnection(persistedMusicState.authorityConnectionId)) === undefined &&
+          !musicState) {
+          musicState = stripLegacyVolumeFields(persistedMusicState);
+        }
       }
     } catch (error) {
       console.warn(
@@ -824,12 +971,19 @@ async function initialize(): Promise<void> {
       console.error("[cinematic-sync] Falha ao processar broadcast.", error);
     });
   });
+  OBR.broadcast.onMessage(AUDIO_ACTIVATION_CHANNEL, (event) => {
+    if (event.connectionId !== identity.connectionId) return;
+    if (event.data === "ACTIVATE" && musicState && musicClockReady(musicState)) {
+      musicPlayer?.retryAutoplay();
+    } else if (event.data === "OPEN_CONTROLS" && activationOffered) {
+      void openControls().then(() => OBR.popover.close(AUDIO_ACTIVATION_POPOVER_ID)).catch((error: unknown) => {
+        console.warn("[cinematic-sync] Não foi possível abrir os controles de áudio.", error);
+      });
+    }
+  });
   OBR.party.onChange((updatedPlayers) => {
-    void refreshParty(updatedPlayers).catch((error: unknown) => {
+    void refreshParty(updatedPlayers).then(recoverMusicState).catch((error: unknown) => {
       console.error("[cinematic-sync] Falha ao atualizar Party.", error);
-    });
-    void requestMusicState().catch((error: unknown) => {
-      console.error("[cinematic-sync] Falha ao solicitar estado musical.", error);
     });
   });
   OBR.room.onMetadataChange((metadata) => {
@@ -841,6 +995,7 @@ async function initialize(): Promise<void> {
     }
   });
   OBR.player.onChange((player) => {
+    const connectionChanged = identity.connectionId !== player.connectionId;
     identity = {
       connectionId: player.connectionId,
       name: player.name,
@@ -849,29 +1004,42 @@ async function initialize(): Promise<void> {
     void syncTool().catch((error: unknown) => {
       console.error("[cinematic-sync] Falha ao atualizar a Tool.", error);
     });
-    beginClockSyncIfNeeded();
+    if (connectionChanged) {
+      resetClockSync();
+      recoverMusicAfterReconnect();
+    } else {
+      beginClockSyncIfNeeded();
+    }
     if (player.role === "GM") {
       void (async () => {
         await musicHydrationPromise;
-        await ensureInitialGmMusicState();
+        await queueGmCommand(ensureInitialGmMusicState);
       })().catch((error: unknown) => {
         console.error("[cinematic-sync] Falha ao iniciar estado musical.", error);
       });
     }
   });
 
-  await syncTool();
-  beginClockSyncIfNeeded();
-  await musicHydrationPromise;
-  await ensureInitialGmMusicState();
-  await requestMusicState();
+  window.addEventListener("online", recoverMusicAfterReconnect);
   window.setInterval(() => {
-    if (musicState) {
+    if (musicState && musicClockReady(musicState)) {
       musicPlayer?.reconcile(musicState);
+    } else {
+      recoverMusicAfterReconnect();
     }
   }, MUSIC_DRIFT_CHECK_INTERVAL_MS);
-  await sendStatus();
-  await runPreload();
+  recoverMusicAfterReconnect();
+  void syncTool().catch((error: unknown) => {
+    console.warn("[cinematic-sync] Não foi possível registrar os controles.", error);
+  });
+  void sendStatus().catch((error: unknown) => {
+    console.warn("[cinematic-sync] Não foi possível enviar o diagnóstico inicial.", error);
+  });
+  void runPreload().catch((error: unknown) => {
+    console.warn("[cinematic-sync] Não foi possível publicar o diagnóstico de mídia.", error);
+  });
+  await musicHydrationPromise;
+  await queueGmCommand(ensureInitialGmMusicState);
 }
 
 OBR.onReady(() => {

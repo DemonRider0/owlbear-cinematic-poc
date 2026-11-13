@@ -34,6 +34,8 @@ export interface PlaybackDiagnostics {
   endedAt?: number;
 }
 
+export type MusicPlaybackStatus = "IDLE" | "STARTING" | "PLAYING" | "BLOCKED" | "ERROR";
+
 export interface ClientDiagnostics {
   clock?: ClockDiagnostics;
   error?: {
@@ -43,6 +45,7 @@ export interface ClientDiagnostics {
   };
   media?: MediaDiagnostics;
   playback?: PlaybackDiagnostics;
+  musicPlayback?: MusicPlaybackStatus;
   userAgent?: string;
 }
 
@@ -132,6 +135,11 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function isMusicPlaybackStatus(value: unknown): value is MusicPlaybackStatus {
+  return value === "IDLE" || value === "STARTING" || value === "PLAYING" ||
+    value === "BLOCKED" || value === "ERROR";
+}
+
 export function isProtocolMessage(value: unknown): value is ProtocolMessage {
   if (!isRecord(value) || value.version !== PROTOCOL_VERSION) {
     return false;
@@ -146,6 +154,7 @@ export function isProtocolMessage(value: unknown): value is ProtocolMessage {
         (value.source === "BACKGROUND" || value.source === "MODAL") &&
         isFiniteNumber(value.reportedAt) &&
         isRecord(value.diagnostics) &&
+        (value.diagnostics.musicPlayback === undefined || isMusicPlaybackStatus(value.diagnostics.musicPlayback)) &&
         (value.requestId === undefined || isNonEmptyString(value.requestId))
       );
     case "PLAY":

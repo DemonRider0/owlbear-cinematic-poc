@@ -5,25 +5,32 @@ import {
   MUSIC_GAIN_STEP_MS,
   MUSIC_LOOP_CROSSFADE_MS,
   MUSIC_TRACK_CROSSFADE_MS,
+  getMusicLoop,
   getMusicLoopCycleSeconds,
 } from "../src/config";
 import {
   createCinematicMusicState,
   createEmfMusicState,
   createInitialMusicState,
+  createLayeredMusicState,
   createManualMusicState,
   createPostCinematicMusicState,
   musicGainAtGm,
+  type LayerMusicControlAction,
+  type MusicState,
 } from "../src/music-state";
 import type { LocalAudioVolumes } from "../src/local-audio-settings";
+import type { MusicPlaybackStatus } from "../src/protocol";
 
 class FakeAudio extends EventTarget {
   static instances: FakeAudio[] = [];
+  static autoplayBlocked = false;
 
   error: MediaError | null = null;
   deferPlay = false;
   loop = false;
   paused = true;
+  playbackRate = 1;
   pauseCalls = 0;
   playCalls = 0;
   preload = "";
@@ -41,6 +48,10 @@ class FakeAudio extends EventTarget {
 
   load(): void {}
 
+  removeAttribute(name: string): void {
+    if (name === "src") this.src = "";
+  }
+
   get currentTime(): number {
     return this.mediaTime;
   }
@@ -57,6 +68,9 @@ class FakeAudio extends EventTarget {
 
   play(): Promise<void> {
     this.playCalls += 1;
+    if (FakeAudio.autoplayBlocked) {
+      return Promise.reject(new DOMException("Sem ativação.", "NotAllowedError"));
+    }
     this.paused = false;
     if (this.deferPlay) {
       return new Promise((resolve) => {
@@ -77,6 +91,7 @@ describe("persistent music player", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     FakeAudio.instances = [];
+    FakeAudio.autoplayBlocked = false;
     vi.stubGlobal("Audio", FakeAudio);
     vi.stubGlobal("window", {
       clearTimeout,
@@ -88,15 +103,17 @@ describe("persistent music player", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
-  function createPlayer(volumes?: LocalAudioVolumes): MusicPlayer {
+  function createPlayer(volumes?: LocalAudioVolumes, onPlaybackChange?: (status: MusicPlaybackStatus) => void): MusicPlayer {
     return new MusicPlayer(
       {
         gmNow: () => Date.now(),
         toLocalTime: (gmTime) => gmTime,
       },
       volumes,
+      onPlaybackChange,
     );
   }
 
@@ -107,6 +124,258 @@ describe("persistent music player", () => {
     }
     return audio;
   }
+
+  function issue(state: MusicState, action: LayerMusicControlAction, at: number): MusicState {
+    return createLayeredMusicState(state, action, "gm-1", String(state.revision + 1), at - 500, at);
+  }
+
+  function trackVoices(trackId: string): FakeAudio[] {
+    return FakeAudio.instances.filter(({ src }) => src.includes(`/${trackId}.ogg`));
+  }
+
+  it("queues rapid anchors, mixes three layers and leaves unaffected voices running", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const first = issue(initial, { type: "ADD_TRACK", trackId: "vali-et-ensomt-minne" }, 1_500);
+    const second = issue(first, { type: "ADD_TRACK", trackId: "wildfire" }, 1_600);
+    const third = issue(second, { type: "ADD_TRACK", trackId: "nightfire-ritual" }, 1_700);
+    expect(trackVoices("wildfire")).toHaveLength(0);
+    player.applyState(first);
+    player.applyState(second);
+    player.applyState(third);
+    await vi.advanceTimersByTimeAsync(500);
+    const vali = trackVoices("vali-et-ensomt-minne")[0]!;
+    const wildfire = trackVoices("wildfire")[0]!;
+    const nightfire = trackVoices("nightfire-ritual")[0]!;
+    expect(vali.paused).toBe(false);
+    expect(wildfire.paused).toBe(true);
+    await vi.advanceTimersByTimeAsync(550);
+    expect([vali, wildfire, nightfire].every(({ paused }) => !paused)).toBe(true);
+    expect(wildfire.volume).toBeLessThan(0.5);
+    expect(wildfire.volume).toBeCloseTo(nightfire.volume);
+    const setWildfire = issue(third, { type: "SET_MIX_VOLUME", trackId: "wildfire", volume: 0.8 }, 2_550);
+    const setNightfire = issue(setWildfire, { type: "SET_MIX_VOLUME", trackId: "nightfire-ritual", volume: 0.3 }, 2_650);
+    const pauseVali = issue(setNightfire, { type: "PAUSE_LAYER", trackId: "vali-et-ensomt-minne" }, 2_750);
+    const unaffected = [wildfire, nightfire].map(({ playCalls, seekCalls }) => ({ playCalls, seekCalls }));
+    player.applyState(setWildfire);
+    player.applyState(setNightfire);
+    player.applyState(pauseVali);
+    player.applyState(second);
+    await vi.advanceTimersByTimeAsync(4_700);
+    expect(vali.paused).toBe(true);
+    expect(vali.src).toBe("");
+    expect(wildfire.volume).toBeCloseTo(0.8);
+    expect(nightfire.volume).toBeCloseTo(0.3);
+    player.setLocalVolumes({ musicVolume: 0.5, effectsVolume: 0.25 });
+    expect(wildfire.volume).toBeCloseTo(0.4);
+    expect(nightfire.volume).toBeCloseTo(0.15);
+    expect(audioAt(4).volume).toBeCloseTo(0.25);
+    expect([wildfire, nightfire].map(({ playCalls, seekCalls }) => ({ playCalls, seekCalls }))).toEqual(unaffected);
+  });
+
+  it("reports autoplay blocking and retries the current anchors once without changing volumes", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const onPlaybackChange = vi.fn();
+    const player = createPlayer({ musicVolume: 0.5, effectsVolume: 0.2 }, onPlaybackChange);
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const first = issue(initial, { type: "ADD_TRACK", trackId: "tensao-crescente" }, 1_500);
+    const second = issue(first, { type: "ADD_TRACK", trackId: "perseguicao-frenetica" }, 2_000);
+    const mix = issue(second, { type: "SET_MIX_VOLUME", trackId: "tensao-crescente", volume: 0.3 }, 2_500);
+    FakeAudio.autoplayBlocked = true;
+    await vi.advanceTimersByTimeAsync(2_000);
+    player.applyState(mix);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onPlaybackChange).toHaveBeenLastCalledWith("BLOCKED");
+    expect(onPlaybackChange).not.toHaveBeenCalledWith("PLAYING");
+    expect(FakeAudio.instances.every(({ paused }) => paused)).toBe(true);
+
+    FakeAudio.autoplayBlocked = false;
+    player.retryAutoplay();
+    player.retryAutoplay();
+    await vi.advanceTimersByTimeAsync(0);
+    const tension = trackVoices("tensao-crescente")[0]!;
+    const chase = trackVoices("perseguicao-frenetica")[0]!;
+    expect(tension.currentTime).toBeCloseTo(1.5);
+    expect(chase.currentTime).toBeCloseTo(1);
+    expect(tension.volume).toBeCloseTo(0.15);
+    expect(chase.volume).toBeCloseTo(0.5);
+    expect(tension.playCalls).toBe(2);
+    expect(chase.playCalls).toBe(2);
+    expect(audioAt(4).volume).toBeCloseTo(0.2);
+    expect(new Set(FakeAudio.instances.filter(({ paused }) => !paused))).toEqual(new Set([tension, chase]));
+    expect(onPlaybackChange).toHaveBeenLastCalledWith("PLAYING");
+  });
+
+  it("does not confirm playback before the native play promise resolves", async () => {
+    const onPlaybackChange = vi.fn();
+    const player = createPlayer(undefined, onPlaybackChange);
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const playing = issue(initial, { type: "ADD_TRACK", trackId: "tensao-ruptura" }, 1_500);
+    player.applyState(playing);
+    const voice = trackVoices("tensao-ruptura")[0]!;
+    voice.deferPlay = true;
+    await vi.advanceTimersByTimeAsync(600);
+    expect(onPlaybackChange).toHaveBeenLastCalledWith("STARTING");
+    voice.finishDeferredPlay();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onPlaybackChange).toHaveBeenLastCalledWith("PLAYING");
+  });
+
+  it("applies the pause fade on late join and resumes at its shared deadline", async () => {
+    const player = createPlayer({ musicVolume: 0.5, effectsVolume: 1 });
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const playing = issue(initial, { type: "ADD_TRACK", trackId: "tensao-pressagio" }, 1_500);
+    const mix = issue(playing, { type: "SET_MIX_VOLUME", trackId: "tensao-pressagio", volume: 0.8 }, 2_000);
+    const pausing = issue(mix, { type: "PAUSE_LAYER", trackId: "tensao-pressagio" }, 3_000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    player.applyState(pausing);
+    const outgoing = trackVoices("tensao-pressagio")[0]!;
+    expect(outgoing.currentTime).toBeCloseTo(3.5);
+    expect(outgoing.volume).toBeCloseTo(0.4 * Math.SQRT1_2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(outgoing.paused).toBe(true);
+    expect(outgoing.volume).toBe(0);
+    const resumed = issue(pausing, { type: "PLAY_LAYER", trackId: "tensao-pressagio" }, 7_500);
+    player.applyState(resumed);
+    const incoming = trackVoices("tensao-pressagio")[0]!;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(incoming.currentTime).toBeCloseTo(5.5);
+    expect(incoming.volume).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(incoming.volume).toBeCloseTo(0.4 * Math.SQRT1_2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(incoming.volume).toBeCloseTo(0.4);
+    expect(FakeAudio.instances.filter(({ paused }) => !paused)).toEqual([incoming]);
+  });
+
+  it("reverses a rapid Pause/Play on the existing voice with no late stop", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const playing = issue(initial, { type: "ADD_TRACK", trackId: "wildfire" }, 1_500);
+    const pausing = issue(playing, { type: "PAUSE_LAYER", trackId: "wildfire" }, 2_500);
+    const resumed = issue(pausing, { type: "PLAY_LAYER", trackId: "wildfire" }, 3_500);
+    player.applyState(playing);
+    player.applyState(pausing);
+    player.applyState(resumed);
+    await vi.advanceTimersByTimeAsync(2_400);
+    const voice = trackVoices("wildfire")[0]!;
+    expect(voice.volume).toBeGreaterThan(0.85);
+    expect(voice.volume).toBeLessThan(0.98);
+    await vi.advanceTimersByTimeAsync(4_200);
+    expect(voice.paused).toBe(false);
+    expect(voice.playCalls).toBe(1);
+    expect(voice.volume).toBeCloseTo(1);
+  });
+
+  it("keeps outgoing layers audible while a replacement buffers, then releases their voices", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const old = issue(initial, { type: "ADD_TRACK", trackId: "wildfire" }, 1_500);
+    player.applyState(old);
+    await vi.advanceTimersByTimeAsync(900);
+    const previous = trackVoices("wildfire")[0]!;
+    const replacement = issue(old, { type: "REPLACE_TRACK", trackId: "what-remains" }, 2_400);
+    player.applyState(replacement);
+    const next = trackVoices("what-remains")[0]!;
+    next.deferPlay = true;
+    await vi.advanceTimersByTimeAsync(4_600);
+    expect(previous.volume).toBeGreaterThan(0.5);
+    expect(previous.paused).toBe(false);
+    next.finishDeferredPlay();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(previous.paused).toBe(true);
+    expect(previous.src).toBe("");
+    expect(next.playCalls).toBe(1);
+    expect(next.currentTime).toBeCloseTo(4.1);
+    expect(next.volume).toBeCloseTo(1);
+    expect(trackVoices("what-remains").filter(({ paused }) => !paused)).toEqual([next]);
+  });
+
+  it("honors the last of two quick replacements without restarting its already-playing track", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const a = issue(initial, { type: "ADD_TRACK", trackId: "wildfire" }, 1_500);
+    const b = issue(a, { type: "ADD_TRACK", trackId: "nightfire-ritual" }, 1_600);
+    player.applyState(a);
+    player.applyState(b);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const wildfire = trackVoices("wildfire")[0]!;
+    const nightfire = trackVoices("nightfire-ritual")[0]!;
+    const wildfirePlayCalls = wildfire.playCalls;
+    const wildfireSeekCalls = wildfire.seekCalls;
+    const first = issue(b, { type: "REPLACE_TRACK", trackId: "what-remains" }, 2_500);
+    const last = issue(first, { type: "REPLACE_TRACK", trackId: "wildfire" }, 2_550);
+    player.applyState(first);
+    player.applyState(last);
+    const whatRemains = trackVoices("what-remains")[0]!;
+    await vi.advanceTimersByTimeAsync(4_950);
+    expect(FakeAudio.instances.filter(({ paused }) => !paused)).toEqual([wildfire]);
+    expect(wildfire.playCalls).toBe(wildfirePlayCalls);
+    expect(wildfire.seekCalls).toBe(wildfireSeekCalls);
+    expect(wildfire.volume).toBeCloseTo(1);
+    expect(nightfire.src).toBe("");
+    expect(whatRemains.src).toBe("");
+  });
+
+  it("rebuilds a nonzero seam on late join without restarting the other layer", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const first = issue(initial, { type: "ADD_TRACK", trackId: "what-remains" }, 1_500);
+    const second = issue(first, { type: "ADD_TRACK", trackId: "wildfire" }, 2_500);
+    player.applyState(first);
+    player.applyState(second);
+    const loop = getMusicLoop("what-remains");
+    await vi.advanceTimersByTimeAsync(500 + loop.seamSeconds * 1_000 + 120);
+    const original = trackVoices("what-remains");
+    expect(original.every(({ paused }) => !paused)).toBe(true);
+    const latePlayer = createPlayer();
+    latePlayer.applyState(second);
+    await vi.advanceTimersByTimeAsync(0);
+    const joined = trackVoices("what-remains").slice(2);
+    expect(joined.every(({ paused }) => !paused)).toBe(true);
+    expect(joined[0]?.currentTime).toBeCloseTo(loop.seamSeconds + 0.12);
+    expect(joined[1]?.currentTime).toBeCloseTo(loop.startSeconds + 0.12);
+    expect(trackVoices("wildfire")[2]?.currentTime).toBeCloseTo(loop.seamSeconds - 0.88);
+    await vi.advanceTimersByTimeAsync(loop.crossfadeSeconds * 1_000);
+    expect(joined.filter(({ paused }) => !paused)).toHaveLength(1);
+    const other = trackVoices("wildfire")[2]!;
+    const previous = { playCalls: other.playCalls, seekCalls: other.seekCalls };
+    const seek = issue(second, { type: "SEEK_LAYER", trackId: "what-remains", positionSeconds: 4 }, Date.now() + 500);
+    latePlayer.applyState(seek);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(joined[1]?.currentTime).toBe(4);
+    expect(other.playCalls).toBe(previous.playCalls);
+    expect(other.seekCalls).toBe(previous.seekCalls);
+  });
+
+  it("stops every layer for an exclusive EMF and preserves the effect across mix updates", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const a = issue(initial, { type: "ADD_TRACK", trackId: "wildfire" }, 1_500);
+    const b = issue(a, { type: "ADD_TRACK", trackId: "nightfire-ritual" }, 1_600);
+    player.applyState(a);
+    player.applyState(b);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const playing = FakeAudio.instances.filter(({ paused }) => !paused);
+    expect(playing).toHaveLength(2);
+    const effect = createEmfMusicState(b, "emf-1", "gm-1", "emf", 2_000, 2_500);
+    player.applyState(effect);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(playing.every(({ paused }) => paused)).toBe(true);
+    const emf = audioAt(4);
+    expect(emf.playCalls).toBe(1);
+    const mix = issue(effect, { type: "SET_MIX_VOLUME", trackId: "wildfire", volume: 0.2 }, 3_000);
+    player.applyState(mix);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(emf.playCalls).toBe(1);
+    expect(emf.paused).toBe(false);
+    const resume = issue(mix, { type: "PLAY_LAYER", trackId: "nightfire-ritual" }, 3_500);
+    player.applyState(resume);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(emf.paused).toBe(true);
+    expect(trackVoices("nightfire-ritual")[0]?.currentTime).toBeCloseTo(0.9);
+    expect(trackVoices("wildfire")).toHaveLength(0);
+  });
 
   it("starts O Porão audibly at local 100% even when shared legacy volume is zero", async () => {
     const player = createPlayer();

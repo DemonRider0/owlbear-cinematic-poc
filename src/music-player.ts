@@ -3,9 +3,10 @@ import {
   MUSIC_CINEMATIC_FADE_OUT_MS,
   MUSIC_DRIFT_TOLERANCE_SECONDS,
   MUSIC_GAIN_STEP_MS,
-  MUSIC_LOOP_CROSSFADE_MS,
+  MUSIC_LAYER_FADE_MS,
   MUSIC_PRELOAD_TIMEOUT_MS,
   MUSIC_TRACKS,
+  getMusicLoop,
   getMusicLoopCycleSeconds,
   getMusicTrackConfig,
   getMusicTrackRequestUrl,
@@ -14,12 +15,18 @@ import {
   type MusicTrackId,
 } from "./config";
 import {
+  compareMusicStates,
   emfPositionAtGm,
   musicGainAtGm,
+  musicLayerFadeAtGm,
+  musicLayerIsPlaying,
+  musicLayerMixAtGm,
+  musicLayerPositionAtGm,
   musicPositionAtGm,
   nextMusicLoopSeamAtGm,
   normalizeMusicMediaPosition,
   normalizeMusicPosition,
+  type MusicLayer,
   type MusicState,
 } from "./music-state";
 import {
@@ -27,6 +34,8 @@ import {
   normalizeLocalAudioVolumes,
   type LocalAudioVolumes,
 } from "./local-audio-settings";
+import { toSerializableError } from "./errors";
+import type { MusicPlaybackStatus } from "./protocol";
 
 interface MusicClock {
   gmNow(): number;
@@ -47,6 +56,10 @@ interface TrackDeck {
   activeSlot: VoiceSlot;
   loopGeneration: number;
   loopInProgressUntilGm?: number;
+  loopTimers: Set<Timer>;
+  layerTimeline?: DeckTimeline;
+  layerStarted?: boolean;
+  heldFade?: { commandAtGm: number; resumeAtGm?: number; endAtGm?: number };
   trackGain: number;
   trackId: MusicTrackId;
   voices: [TrackVoice, TrackVoice];
@@ -66,9 +79,17 @@ interface DeckTimeline {
   trackId: MusicTrackId;
   updatedAtGm: number;
   validUntilGm?: number;
+  layered?: boolean;
 }
 
 type Timer = number;
+interface MediaPlayback {
+  status: Exclude<MusicPlaybackStatus, "IDLE">;
+  pending?: Promise<void>;
+}
+
+const LAYER_GAIN_STEP_MS = 16;
+const REPLACEMENT_GRACE_MS = 4_000;
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
@@ -100,46 +121,26 @@ export class MusicPlayer {
   private localEffectsVolume: number;
   private appliedStateId: string | undefined;
   private currentState: MusicState | undefined;
-  private pendingActivationTimer: Timer | undefined;
-  private receivedStateId: string | undefined;
+  private readonly pendingActivations = new Set<Timer>();
+  private receivedState: MusicState | undefined;
   private completedEmfStateId: string | undefined;
+  private mixTimer: Timer | undefined;
+  private layerHeadroom = 1;
+  private readonly mediaPlayback = new Map<HTMLAudioElement, MediaPlayback>();
+  private reportedPlayback: MusicPlaybackStatus = "IDLE";
+  private playbackReportPending = false;
 
   constructor(
     clock: MusicClock,
     initialVolumes: LocalAudioVolumes = DEFAULT_LOCAL_AUDIO_VOLUMES,
+    private readonly onPlaybackChange?: (status: MusicPlaybackStatus) => void,
   ) {
     this.clock = clock;
     const normalizedVolumes = normalizeLocalAudioVolumes(initialVolumes);
     this.localMusicVolume = normalizedVolumes.musicVolume;
     this.localEffectsVolume = normalizedVolumes.effectsVolume;
-    for (const config of MUSIC_TRACKS) {
-      const createVoice = (slot: VoiceSlot): TrackVoice => {
-        const element = new Audio();
-        element.preload = "auto";
-        element.loop = false;
-        element.volume = 0;
-        element.src = getMusicTrackRequestUrl(config.id);
-        element.addEventListener("error", () => {
-          console.error(
-            `[cinematic-sync] Falha ao carregar a música ${config.label} (voz ${slot + 1}).`,
-            element.error,
-          );
-        });
-        return {
-          element,
-          gain: 0,
-          playToken: 0,
-          slot,
-          trackId: config.id,
-        };
-      };
-      this.tracks.set(config.id, {
-        activeSlot: 0,
-        loopGeneration: 0,
-        trackGain: 0,
-        trackId: config.id,
-        voices: [createVoice(0), createVoice(1)],
-      });
+    for (const { id, loop } of MUSIC_TRACKS) {
+      if (!loop) this.requiredDeck(id);
     }
     for (const config of EMFS) {
       const element = new Audio();
@@ -147,6 +148,7 @@ export class MusicPlayer {
       element.loop = false;
       element.volume = this.localEffectsVolume;
       element.src = getEmfRequestUrl(config.id);
+      element.addEventListener("pause", () => this.reportPlayback());
       element.addEventListener("error", () => {
         console.error(
           `[cinematic-sync] Falha ao carregar ${config.label}.`,
@@ -164,7 +166,8 @@ export class MusicPlayer {
 
   async preload(): Promise<void> {
     const candidates = [
-      ...this.allVoices().map(({ element, trackId, slot }) => ({
+      ...this.allVoices().filter(({ trackId }) => !getMusicTrackConfig(trackId).loop)
+        .map(({ element, trackId, slot }) => ({
         description: `música ${trackId}, voz ${slot + 1}`,
         element,
       })),
@@ -217,31 +220,36 @@ export class MusicPlayer {
   }
 
   applyState(state: MusicState): void {
-    if (this.receivedStateId === state.stateId) {
+    const previous = this.receivedState;
+    if (previous && (previous.stateId === state.stateId || compareMusicStates(state, previous) <= 0)) {
       return;
     }
-    this.receivedStateId = state.stateId;
-    if (this.pendingActivationTimer !== undefined) {
-      window.clearTimeout(this.pendingActivationTimer);
-      this.pendingActivationTimer = undefined;
+    this.receivedState = state;
+    if (state.mode === "CINEMATIC" || (previous && previous.authorityConnectionId !== state.authorityConnectionId)) {
+      for (const timer of this.pendingActivations) window.clearTimeout(timer);
+      this.pendingActivations.clear();
     }
-
+    if (state.mode === "MANUAL" && state.layers) {
+      for (const layer of state.layers) {
+        if (musicLayerIsPlaying(layer, Math.max(state.anchorAtGm, this.clock.gmNow()))) {
+          this.requiredDeck(layer.trackId);
+        }
+      }
+    }
     const activationAtLocal = this.clock.toLocalTime(
       state.anchorAtGm,
       state.updatedAtGm,
     );
     if (
       (state.mode === "MANUAL" || state.mode === "EMF") &&
-      this.currentState !== undefined &&
+      (this.currentState !== undefined || state.layers !== undefined) &&
       activationAtLocal > Date.now()
     ) {
-      const expectedStateId = state.stateId;
-      this.pendingActivationTimer = window.setTimeout(() => {
-        this.pendingActivationTimer = undefined;
-        if (this.receivedStateId === expectedStateId) {
+      this.scheduleAt(activationAtLocal, () => {
+        if (!this.currentState || compareMusicStates(state, this.currentState) > 0) {
           this.activateState(state);
         }
-      }, activationAtLocal - Date.now());
+      }, this.pendingActivations);
       return;
     }
     this.activateState(state);
@@ -251,9 +259,7 @@ export class MusicPlayer {
     const normalized = normalizeLocalAudioVolumes(volumes);
     if (normalized.musicVolume !== this.localMusicVolume) {
       this.localMusicVolume = normalized.musicVolume;
-      for (const voice of this.allVoices()) {
-        this.refreshVoiceVolume(voice);
-      }
+      this.refreshMusicVolumes();
     }
     if (normalized.effectsVolume !== this.localEffectsVolume) {
       this.localEffectsVolume = normalized.effectsVolume;
@@ -264,27 +270,62 @@ export class MusicPlayer {
   }
 
   private activateState(state: MusicState): void {
+    const previous = this.currentState;
+    const wasLayered = previous?.mode === "MANUAL" && previous.layers !== undefined;
+    const isLayered = state.mode === "MANUAL" && state.layers !== undefined;
+    if (!isLayered || !wasLayered) {
+      this.cancelAutomation();
+    }
+    if (wasLayered && !isLayered) {
+      if (this.mixTimer !== undefined) window.clearTimeout(this.mixTimer);
+      this.mixTimer = undefined;
+      for (const deck of this.tracks.values()) {
+        deck.trackGain *= this.layerHeadroom;
+      }
+      this.layerHeadroom = 1;
+    }
     this.appliedStateId = state.stateId;
     this.currentState = state;
-    this.cancelAutomation();
 
     if (state.mode === "CINEMATIC") {
       this.applyCinematicState(state);
     } else if (state.mode === "EMF") {
-      this.applyEmfState(state);
+      if (previous?.mode !== "EMF" ||
+        previous.emf?.startAtGm !== state.emf?.startAtGm || previous.emf?.id !== state.emf?.id) {
+        this.applyEmfState(state);
+      }
+    } else if (state.layers) {
+      this.applyLayeredState(state, state.layers);
     } else {
       this.applyManualState(state);
     }
   }
 
-  reconcile(state: MusicState): void {
-    if (state.stateId !== this.appliedStateId) {
+  retryAutoplay(): void {
+    if (this.receivedState && this.reportedPlayback === "BLOCKED" &&
+      [...this.mediaPlayback.keys()].some((element) => this.needsAutoplayRetry(element))) {
+      this.reconcile(this.receivedState, true);
+    }
+  }
+
+  private needsAutoplayRetry(element: HTMLAudioElement): boolean {
+    const attempt = this.mediaPlayback.get(element);
+    return attempt?.status === "BLOCKED" && attempt.pending === undefined;
+  }
+
+  reconcile(state: MusicState, retryBlocked = false): void {
+    if (!this.currentState || state.stateId !== this.receivedState?.stateId) {
       return;
     }
+    state = this.currentState;
 
     const gmNow = this.clock.gmNow();
     if (state.mode === "EMF") {
       this.reconcileEmf(state, gmNow);
+      return;
+    }
+    if (state.mode === "MANUAL" && state.layers) {
+      this.reconcileLayers(state, state.layers, gmNow, retryBlocked);
       return;
     }
     if (!state.playing) {
@@ -301,6 +342,12 @@ export class MusicPlayer {
       state.transition &&
       gmNow < state.transition.startAtGm + state.transition.durationMs
     ) {
+      if (retryBlocked && this.requiredDeck(state.trackId).voices.some(
+        ({ element }) => this.needsAutoplayRetry(element),
+      )) {
+        this.cancelAutomation();
+        this.applyManualState(state);
+      }
       return;
     }
 
@@ -325,6 +372,156 @@ export class MusicPlayer {
       MUSIC_DRIFT_TOLERANCE_SECONDS
     ) {
       this.setPosition(voice.element, expected);
+    }
+  }
+
+  private applyLayeredState(state: MusicState, layers: MusicLayer[]): void {
+    this.pauseAllEmfs();
+    if (this.mixTimer !== undefined) window.clearTimeout(this.mixTimer);
+    this.updateLayerMix(state, layers);
+    const now = this.clock.gmNow();
+    for (const layer of layers) {
+      if (!musicLayerIsPlaying(layer, now)) continue;
+      const deck = this.requiredDeck(layer.trackId);
+      const timeline = deck.layerTimeline;
+      if (timeline?.positionSeconds === layer.positionSeconds &&
+        timeline.anchorAtGm === layer.anchorAtGm) {
+        continue;
+      }
+      // A new anchor inside an already-playing deck is a seek or a clock
+      // takeover. A seek applies even if it changes the position by < 350 ms.
+      const preserve = !timeline || layer.anchorAtGm !== state.anchorAtGm;
+      this.startLayerTimeline(deck, layer, state, preserve);
+    }
+  }
+
+  private startLayerTimeline(
+    deck: TrackDeck,
+    layer: MusicLayer,
+    state: MusicState,
+    preservePosition: boolean,
+  ): void {
+    this.clearDeckLoop(deck);
+    const timeline: DeckTimeline = {
+      stateId: state.stateId,
+      updatedAtGm: state.updatedAtGm,
+      trackId: layer.trackId,
+      positionSeconds: layer.positionSeconds,
+      anchorAtGm: layer.anchorAtGm,
+      layered: true,
+    };
+    deck.layerTimeline = timeline;
+    const voice = this.activeVoice(deck);
+    this.pauseVoice(this.inactiveVoice(deck));
+    if (!this.beginDeckLoopScheduling(deck, timeline)) {
+      this.setVoiceGain(voice, 1);
+      this.startVoice(
+        voice, musicLayerPositionAtGm(layer, this.clock.gmNow()), preservePosition, true,
+        () => { deck.layerStarted = true; },
+      );
+    } else {
+      deck.layerStarted = true;
+    }
+  }
+
+  private updateLayerMix(state: MusicState, layers: MusicLayer[]): void {
+    this.mixTimer = undefined;
+    const now = this.clock.gmNow();
+    let nextTick = Number.POSITIVE_INFINITY;
+    const byTrack = new Map(layers.map((layer) => [layer.trackId, layer]));
+    const latest = this.receivedState;
+    for (const deck of this.tracks.values()) {
+      const layer = byTrack.get(deck.trackId);
+      const delayed = layer && this.delayedReplacementFade(deck, layer, byTrack, now);
+      if (!layer || (!delayed && !musicLayerIsPlaying(layer, now))) {
+        const upcoming = latest && latest.stateId !== state.stateId &&
+          latest.mode === "MANUAL" && latest.layers?.some((entry) =>
+            entry.trackId === deck.trackId && musicLayerIsPlaying(entry, latest.anchorAtGm),
+          );
+        if (deck.layerTimeline || deck.voices.some(({ element }) => !element.paused) ||
+          (!upcoming && getMusicTrackConfig(deck.trackId).loop)) {
+          this.idleDeck(deck);
+        }
+        continue;
+      }
+      deck.trackGain = (delayed?.gain ?? musicLayerFadeAtGm(layer, now)) *
+        musicLayerMixAtGm(state, layer, now);
+      if (delayed) nextTick = Math.min(nextTick, delayed.remainingMs);
+      for (const ramp of [layer.fade, layer.mixTransition]) {
+        if (ramp && ramp.endAtGm > now) nextTick = Math.min(nextTick, ramp.endAtGm - now);
+      }
+    }
+    this.refreshMusicVolumes();
+    if (Number.isFinite(nextTick)) {
+      this.mixTimer = window.setTimeout(
+        () => this.updateLayerMix(state, layers),
+        Math.min(LAYER_GAIN_STEP_MS, nextTick),
+      );
+    }
+  }
+
+  private delayedReplacementFade(
+    deck: TrackDeck, layer: MusicLayer, byTrack: ReadonlyMap<MusicTrackId, MusicLayer>, now: number,
+  ): { gain: number; remainingMs: number } | undefined {
+    const { waitingForTrackId, fade } = layer;
+    if (!waitingForTrackId || !fade) {
+      deck.heldFade = undefined;
+      return;
+    }
+    if (deck.heldFade?.commandAtGm !== fade.startAtGm) deck.heldFade = undefined;
+    const target = byTrack.get(waitingForTrackId);
+    const deadline = fade.endAtGm + REPLACEMENT_GRACE_MS;
+    // Hold only an outgoing voice already audible here. Late joiners follow
+    // the room envelope, and a missing asset never leaves a voice playing forever.
+    if (target && musicLayerIsPlaying(target, now) &&
+      !this.tracks.get(waitingForTrackId)?.layerStarted &&
+      now < deadline && now < (deck.heldFade?.resumeAtGm ?? Number.POSITIVE_INFINITY) &&
+      deck.voices.some(({ element }) => !element.paused) &&
+      (now < fade.endAtGm || deck.heldFade)) {
+      deck.heldFade ??= { commandAtGm: fade.startAtGm };
+      return { gain: fade.fromGain, remainingMs: deadline - now };
+    }
+    if (!deck.heldFade) return;
+    deck.heldFade.resumeAtGm ??= now;
+    deck.heldFade.endAtGm ??= Math.max(fade.endAtGm, now + MUSIC_LAYER_FADE_MS);
+    const { resumeAtGm, endAtGm } = deck.heldFade;
+    if (now >= endAtGm) return;
+    return {
+      gain: fade.fromGain * equalPowerOut((now - resumeAtGm) / (endAtGm - resumeAtGm)),
+      remainingMs: endAtGm - now,
+    };
+  }
+
+  private reconcileLayers(
+    state: MusicState, layers: MusicLayer[], gmNow: number, retryBlocked: boolean,
+  ): void {
+    for (const layer of layers) {
+      if (!musicLayerIsPlaying(layer, gmNow)) continue;
+      const deck = this.requiredDeck(layer.trackId);
+      const voice = this.activeVoice(deck);
+      if (retryBlocked) {
+        if (deck.voices.some(({ element }) => this.needsAutoplayRetry(element))) {
+          this.startLayerTimeline(deck, layer, state, true);
+        }
+        continue;
+      }
+      if (deck.loopInProgressUntilGm !== undefined && gmNow < deck.loopInProgressUntilGm) {
+        continue;
+      }
+      if (voice.element.paused) {
+        this.startLayerTimeline(deck, layer, state, false);
+        continue;
+      }
+      const expected = musicLayerPositionAtGm(layer, gmNow);
+      const drift = expected - voice.element.currentTime;
+      if (Math.abs(drift) >= 1) {
+        voice.element.playbackRate = 1;
+        this.setPosition(voice.element, expected);
+      } else {
+        voice.element.playbackRate = Math.abs(drift) >= 0.15
+          ? 1 + Math.sign(drift) * 0.03
+          : 1;
+      }
     }
   }
 
@@ -454,7 +651,7 @@ export class MusicPlayer {
     const oldVoice = this.activeVoice(oldDeck);
     const newVoice = this.activeVoice(newDeck);
     const outputGain = musicGainAtGm(state, nowGm);
-    let newPlaybackStarted = !newVoice.element.paused;
+    let newPlaybackStarted = this.mediaPlayback.get(newVoice.element)?.status === "PLAYING";
     let transitionCompleted = false;
     const completeSwap = (): void => {
       if (state.stateId !== this.appliedStateId) {
@@ -547,24 +744,23 @@ export class MusicPlayer {
   private beginDeckLoopScheduling(
     deck: TrackDeck,
     timeline: DeckTimeline,
-  ): void {
+  ): boolean {
     const generation = ++deck.loopGeneration;
     deck.loopInProgressUntilGm = undefined;
     const referenceGm = Math.max(this.clock.gmNow(), timeline.anchorAtGm);
     const position = this.positionForTimeline(timeline, referenceGm);
-    const overlapSeconds = MUSIC_LOOP_CROSSFADE_MS / 1_000;
+    const loop = getMusicLoop(deck.trackId);
+    const phase = position - loop.startSeconds;
     const elapsedSinceAnchorSeconds =
       Math.max(0, referenceGm - timeline.anchorAtGm) / 1_000;
-    const hasCrossedASeam =
-      timeline.positionSeconds > Number.EPSILON ||
-      timeline.positionSeconds + elapsedSinceAnchorSeconds >=
-        getMusicLoopCycleSeconds(deck.trackId);
+    const hasCrossedASeam = timeline.positionSeconds + elapsedSinceAnchorSeconds >= loop.seamSeconds ||
+      (!timeline.layered && timeline.positionSeconds > Number.EPSILON);
     if (
       hasCrossedASeam &&
-      position > Number.EPSILON &&
-      position < overlapSeconds
+      phase >= (timeline.layered ? 0 : Number.EPSILON) &&
+      phase < loop.crossfadeSeconds
     ) {
-      const seamAtGm = referenceGm - position * 1_000;
+      const seamAtGm = referenceGm - phase * 1_000;
       const seamAtLocal = this.clock.toLocalTime(
         seamAtGm,
         timeline.updatedAtGm,
@@ -577,9 +773,16 @@ export class MusicPlayer {
         seamAtLocal,
         true,
       );
-      return;
+      return true;
     }
     this.scheduleNextDeckLoop(deck, timeline, generation);
+    return false;
+  }
+
+  private isCurrentLoop(deck: TrackDeck, timeline: DeckTimeline, generation: number): boolean {
+    return deck.loopGeneration === generation && (timeline.layered
+      ? deck.layerTimeline === timeline
+      : timeline.stateId === this.appliedStateId);
   }
 
   private scheduleNextDeckLoop(
@@ -588,10 +791,7 @@ export class MusicPlayer {
     generation: number,
     requestedSeamAtGm?: number,
   ): void {
-    if (
-      deck.loopGeneration !== generation ||
-      timeline.stateId !== this.appliedStateId
-    ) {
+    if (!this.isCurrentLoop(deck, timeline, generation)) {
       return;
     }
     const referenceGm = Math.max(this.clock.gmNow(), timeline.anchorAtGm);
@@ -617,7 +817,7 @@ export class MusicPlayer {
         seamAtGm,
         seamAtLocal,
       );
-    });
+    }, deck.loopTimers);
   }
 
   private startDeckLoopCrossfade(
@@ -628,13 +828,12 @@ export class MusicPlayer {
     seamAtLocal: number,
     reconstructing = false,
   ): void {
-    if (
-      deck.loopGeneration !== generation ||
-      timeline.stateId !== this.appliedStateId
-    ) {
+    if (!this.isCurrentLoop(deck, timeline, generation)) {
       return;
     }
-    const overlapSeconds = MUSIC_LOOP_CROSSFADE_MS / 1_000;
+    const loop = getMusicLoop(deck.trackId);
+    const overlapSeconds = loop.crossfadeSeconds;
+    const overlapMs = overlapSeconds * 1_000;
     const elapsedSeconds = Math.max(0, this.clock.gmNow() - seamAtGm) / 1_000;
     const progress = clamp01(elapsedSeconds / overlapSeconds);
     if (progress >= 1) {
@@ -655,13 +854,10 @@ export class MusicPlayer {
 
     const outgoing = this.activeVoice(deck);
     const incoming = this.inactiveVoice(deck);
-    let incomingPlaybackStarted = !incoming.element.paused;
+    let incomingPlaybackStarted = this.mediaPlayback.get(incoming.element)?.status === "PLAYING";
     let transitionCompleted = false;
     const completeSwap = (): void => {
-      if (
-        deck.loopGeneration !== generation ||
-        timeline.stateId !== this.appliedStateId
-      ) {
+      if (!this.isCurrentLoop(deck, timeline, generation)) {
         return;
       }
       deck.activeSlot = incoming.slot;
@@ -669,24 +865,21 @@ export class MusicPlayer {
       this.setVoiceGain(incoming, 1);
     };
     deck.activeSlot = incoming.slot;
-    deck.loopInProgressUntilGm = seamAtGm + MUSIC_LOOP_CROSSFADE_MS;
+    deck.loopInProgressUntilGm = seamAtGm + overlapMs;
     this.setVoiceGain(outgoing, equalPowerOut(progress));
     this.setVoiceGain(incoming, equalPowerIn(progress));
     this.startVoice(
       outgoing,
-      getMusicLoopCycleSeconds(deck.trackId) + elapsedSeconds,
+      loop.seamSeconds + elapsedSeconds,
       !reconstructing,
       false,
     );
-    this.startVoice(incoming, elapsedSeconds, false, false, () => {
-      if (
-        deck.loopGeneration !== generation ||
-        timeline.stateId !== this.appliedStateId
-      ) {
+    this.startVoice(incoming, loop.startSeconds + elapsedSeconds, false, false, () => {
+      if (!this.isCurrentLoop(deck, timeline, generation)) {
         return;
       }
       const currentProgress = clamp01(
-        (Date.now() - seamAtLocal) / MUSIC_LOOP_CROSSFADE_MS,
+        (Date.now() - seamAtLocal) / overlapMs,
       );
       incomingPlaybackStarted = true;
       this.setVoiceGain(incoming, equalPowerIn(currentProgress));
@@ -701,16 +894,13 @@ export class MusicPlayer {
 
     this.runAbsoluteRamp(
       seamAtLocal,
-      MUSIC_LOOP_CROSSFADE_MS,
+      overlapMs,
       (nextProgress) => {
         this.setVoiceGain(outgoing, equalPowerOut(nextProgress));
         this.setVoiceGain(incoming, equalPowerIn(nextProgress));
       },
       () => {
-        if (
-          deck.loopGeneration !== generation ||
-          timeline.stateId !== this.appliedStateId
-        ) {
+        if (!this.isCurrentLoop(deck, timeline, generation)) {
           return;
         }
         transitionCompleted = true;
@@ -735,6 +925,7 @@ export class MusicPlayer {
           seamAtGm + getMusicLoopCycleSeconds(deck.trackId) * 1_000,
         );
       },
+      deck.loopTimers,
     );
   }
 
@@ -782,40 +973,29 @@ export class MusicPlayer {
           voice.playToken === token &&
           state.stateId === this.appliedStateId
         ) {
-          voice.element.pause();
+          this.pauseEmf(voice);
           this.completedEmfStateId = state.stateId;
         }
       },
       { once: true },
     );
-    void voice.element
-      .play()
-      .then(() => {
-        if (
-          voice.playToken !== token ||
-          state.stateId !== this.appliedStateId
-        ) {
-          return;
-        }
-        const expected = emfPositionAtGm(state, this.clock.gmNow());
-        if (
-          expected !== undefined &&
-          expected < emf.durationSeconds &&
-          Math.abs(voice.element.currentTime - expected) >
-            MUSIC_DRIFT_TOLERANCE_SECONDS
-        ) {
-          this.setPosition(voice.element, expected);
-        }
-      })
-      .catch((error: unknown) => {
-        if (voice.playToken !== token) {
-          return;
-        }
-        console.error(
-          `[cinematic-sync] Reprodução de ${emf.id.toUpperCase().replace("-", " ")} bloqueada.`,
-          error,
-        );
-      });
+    this.playMedia(voice.element, emf.id, () => {
+      if (
+        voice.playToken !== token ||
+        state.stateId !== this.appliedStateId
+      ) {
+        return;
+      }
+      const expected = emfPositionAtGm(state, this.clock.gmNow());
+      if (
+        expected !== undefined &&
+        expected < emf.durationSeconds &&
+        Math.abs(voice.element.currentTime - expected) >
+          MUSIC_DRIFT_TOLERANCE_SECONDS
+      ) {
+        this.setPosition(voice.element, expected);
+      }
+    });
   }
 
   private reconcileEmf(state: MusicState, gmNow: number): void {
@@ -1069,33 +1249,69 @@ export class MusicPlayer {
     }
     this.refreshVoiceVolume(voice);
     const token = ++voice.playToken;
-    if (voice.element.paused) {
-      void voice.element
-        .play()
-        .then(() => {
-          if (voice.playToken !== token) {
-            return;
-          }
-          if (synchronizeOnStart) {
-            this.synchronizeStartedVoice(voice);
-          }
-          onPlaybackStarted?.();
-        })
-        .catch((error: unknown) => {
-          if (voice.playToken !== token) {
-            return;
-          }
-          console.error(
-            `[cinematic-sync] Reprodução musical bloqueada (${voice.trackId}, voz ${voice.slot + 1}).`,
-            error,
-          );
-        });
-    } else {
+    this.playMedia(voice.element, `${voice.trackId}, voz ${voice.slot + 1}`, () => {
+      if (voice.playToken !== token) return;
       if (synchronizeOnStart) {
         this.synchronizeStartedVoice(voice);
       }
       onPlaybackStarted?.();
+    });
+  }
+
+  private playMedia(element: HTMLAudioElement, label: string, onStarted: () => void): void {
+    const previous = this.mediaPlayback.get(element);
+    if (!element.paused && previous?.status === "PLAYING") {
+      onStarted();
+      return;
     }
+    if (previous?.pending) {
+      void previous.pending.then(onStarted, () => undefined);
+      return;
+    }
+    const attempt: MediaPlayback = { status: previous?.status === "BLOCKED" ? "BLOCKED" : "STARTING" };
+    this.mediaPlayback.set(element, attempt);
+    const pending = element.play();
+    attempt.pending = pending;
+    this.reportPlayback();
+    void pending.then(() => {
+      if (this.mediaPlayback.get(element) !== attempt) return;
+      attempt.pending = undefined;
+      attempt.status = "PLAYING";
+      this.reportPlayback();
+      onStarted();
+    }, (error: unknown) => {
+      if (this.mediaPlayback.get(element) !== attempt) return;
+      attempt.pending = undefined;
+      const blocked = toSerializableError(error).name === "NotAllowedError";
+      attempt.status = blocked ? "BLOCKED" : "ERROR";
+      if (!blocked || previous?.status !== "BLOCKED") {
+        console.warn(`[cinematic-sync] Não foi possível iniciar ${label}.`, error);
+      }
+      this.reportPlayback();
+    });
+  }
+
+  private pauseMedia(element: HTMLAudioElement): void {
+    this.mediaPlayback.delete(element);
+    element.pause();
+    this.reportPlayback();
+  }
+
+  private reportPlayback(): void {
+    if (this.playbackReportPending) return;
+    this.playbackReportPending = true;
+    queueMicrotask(() => {
+      this.playbackReportPending = false;
+      const statuses = new Set([...this.mediaPlayback].map(([element, attempt]) =>
+        attempt.status === "PLAYING" && element.paused ? "IDLE" : attempt.status,
+      ));
+      const status = (["BLOCKED", "ERROR", "STARTING", "PLAYING"] as const)
+        .find((candidate) => statuses.has(candidate)) ?? "IDLE";
+      if (this.reportedPlayback !== status) {
+        this.reportedPlayback = status;
+        this.onPlaybackChange?.(status);
+      }
+    });
   }
 
   private synchronizeStartedVoice(voice: TrackVoice): void {
@@ -1125,6 +1341,12 @@ export class MusicPlayer {
     state: MusicState,
     gmNow: number,
   ): number | undefined {
+    if (state.mode === "MANUAL" && state.layers) {
+      const layer = state.layers.find((entry) => entry.trackId === trackId);
+      return layer && musicLayerIsPlaying(layer, gmNow)
+        ? musicLayerPositionAtGm(layer, gmNow)
+        : undefined;
+    }
     if (state.mode === "CINEMATIC" && state.cinematic?.outro) {
       const outro = state.cinematic.outro;
       if (trackId === outro.trackId && gmNow >= outro.startAtGm) {
@@ -1186,7 +1408,7 @@ export class MusicPlayer {
 
   private pauseEmf(voice: EmfVoice): void {
     voice.playToken += 1;
-    voice.element.pause();
+    this.pauseMedia(voice.element);
   }
 
   private pauseAllEmfs(): void {
@@ -1197,17 +1419,37 @@ export class MusicPlayer {
 
   private pauseVoice(voice: TrackVoice): void {
     voice.playToken += 1;
-    voice.element.pause();
-    voice.gain = 0;
-    this.refreshVoiceVolume(voice);
+    this.setVoiceGain(voice, 0);
+    this.pauseMedia(voice.element);
+    voice.element.playbackRate = 1;
   }
 
   private pauseDeck(deck: TrackDeck): void {
-    deck.loopGeneration += 1;
-    deck.loopInProgressUntilGm = undefined;
+    this.clearDeckLoop(deck);
+    deck.layerStarted = undefined;
+    deck.heldFade = undefined;
     deck.trackGain = 0;
     for (const voice of deck.voices) {
       this.pauseVoice(voice);
+    }
+  }
+
+  private clearDeckLoop(deck: TrackDeck): void {
+    for (const timer of deck.loopTimers) window.clearTimeout(timer);
+    deck.loopTimers.clear();
+    deck.loopGeneration += 1;
+    deck.loopInProgressUntilGm = undefined;
+    deck.layerTimeline = undefined;
+  }
+
+  private idleDeck(deck: TrackDeck): void {
+    this.pauseDeck(deck);
+    if (getMusicTrackConfig(deck.trackId).loop) {
+      for (const { element } of deck.voices) {
+        element.removeAttribute("src");
+        element.load();
+      }
+      this.tracks.delete(deck.trackId);
     }
   }
 
@@ -1215,14 +1457,14 @@ export class MusicPlayer {
     const allowed = new Set(exceptions);
     for (const deck of this.tracks.values()) {
       if (!allowed.has(deck)) {
-        this.pauseDeck(deck);
+        this.idleDeck(deck);
       }
     }
   }
 
   private pauseAll(): void {
     for (const deck of this.tracks.values()) {
-      this.pauseDeck(deck);
+      this.idleDeck(deck);
     }
   }
 
@@ -1235,13 +1477,30 @@ export class MusicPlayer {
 
   private setVoiceGain(voice: TrackVoice, gain: number): void {
     voice.gain = clamp01(gain);
-    this.refreshVoiceVolume(voice);
+    if (this.currentState?.mode === "MANUAL" && this.currentState.layers) {
+      this.refreshMusicVolumes();
+    } else {
+      this.refreshVoiceVolume(voice);
+    }
+  }
+
+  private refreshMusicVolumes(): void {
+    if (this.currentState?.mode === "MANUAL" && this.currentState.layers) {
+      let combinedPeak = 0;
+      for (const deck of this.tracks.values()) {
+        const { peak } = getMusicTrackConfig(deck.trackId);
+        const summedVoiceGain = deck.voices[0].gain + deck.voices[1].gain;
+        combinedPeak += deck.trackGain * (peak ?? 1) * summedVoiceGain;
+      }
+      this.layerHeadroom = combinedPeak > 0.98 ? 0.98 / combinedPeak : 1;
+    }
+    for (const voice of this.allVoices()) this.refreshVoiceVolume(voice);
   }
 
   private refreshVoiceVolume(voice: TrackVoice): void {
-    const deck = this.requiredDeck(voice.trackId);
+    const deck = this.tracks.get(voice.trackId);
     voice.element.volume = clamp01(
-      deck.trackGain * voice.gain * this.localMusicVolume,
+      (deck?.trackGain ?? 0) * voice.gain * this.localMusicVolume * this.layerHeadroom,
     );
   }
 
@@ -1250,10 +1509,36 @@ export class MusicPlayer {
   }
 
   private requiredDeck(trackId: MusicTrackId): TrackDeck {
-    const deck = this.tracks.get(trackId);
-    if (!deck) {
-      throw new Error(`Deck de áudio ausente para ${trackId}.`);
-    }
+    const existing = this.tracks.get(trackId);
+    if (existing) return existing;
+    const config = getMusicTrackConfig(trackId);
+    const createVoice = (slot: VoiceSlot): TrackVoice => {
+      const element = new Audio();
+      element.preload = "auto";
+      element.loop = false;
+      element.volume = 0;
+      element.src = getMusicTrackRequestUrl(trackId);
+      element.addEventListener("pause", () => this.reportPlayback());
+      element.addEventListener("ended", () => this.reportPlayback());
+      element.addEventListener("error", () => {
+        if (element.getAttribute("src")) {
+          console.error(
+            `[cinematic-sync] Falha ao carregar a música ${config.label} (voz ${slot + 1}).`,
+            element.error,
+          );
+        }
+      });
+      return { element, gain: 0, playToken: 0, slot, trackId };
+    };
+    const deck: TrackDeck = {
+      activeSlot: 0,
+      loopGeneration: 0,
+      loopTimers: new Set(),
+      trackGain: 0,
+      trackId,
+      voices: [createVoice(0), createVoice(1)],
+    };
+    this.tracks.set(trackId, deck);
     return deck;
   }
 
@@ -1265,17 +1550,17 @@ export class MusicPlayer {
     return voice;
   }
 
-  private scheduleAt(localTime: number, callback: () => void): void {
+  private scheduleAt(localTime: number, callback: () => void, timers = this.timers): void {
     const delay = Math.max(0, localTime - Date.now());
     if (delay === 0) {
       callback();
       return;
     }
     const timer = window.setTimeout(() => {
-      this.timers.delete(timer);
+      timers.delete(timer);
       callback();
     }, delay);
-    this.timers.add(timer);
+    timers.add(timer);
   }
 
   private runAbsoluteRamp(
@@ -1283,6 +1568,7 @@ export class MusicPlayer {
     durationMs: number,
     update: (progress: number) => void,
     complete: () => void,
+    timers = this.timers,
   ): void {
     const tick = (): void => {
       const progress = clamp01((Date.now() - startAtLocal) / durationMs);
@@ -1292,13 +1578,13 @@ export class MusicPlayer {
         return;
       }
       const timer = window.setTimeout(() => {
-        this.timers.delete(timer);
+        timers.delete(timer);
         tick();
       },
       Date.now() < startAtLocal
         ? startAtLocal - Date.now()
         : MUSIC_GAIN_STEP_MS);
-      this.timers.add(timer);
+      timers.add(timer);
     };
     tick();
   }
@@ -1309,8 +1595,7 @@ export class MusicPlayer {
     }
     this.timers.clear();
     for (const deck of this.tracks.values()) {
-      deck.loopGeneration += 1;
-      deck.loopInProgressUntilGm = undefined;
+      this.clearDeckLoop(deck);
     }
   }
 }

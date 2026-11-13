@@ -8,15 +8,18 @@ import {
   PLAY_START_DELAY_MS,
   STATUS_REFRESH_INTERVAL_MS,
   getEmfConfig,
-  getMusicLoopCycleSeconds,
-  getMusicTrackConfig,
+  getMusicLoop,
+  type MusicTrackId,
 } from "./config";
 import {
   compareMusicStates,
   createCinematicMusicState,
+  getMusicLayer,
+  getMusicMixVolume,
   isCinematicMusicLocked,
   isEmfActive,
-  musicPositionAtGm,
+  musicLayerPositionAtGm,
+  musicLayerStatusAtGm,
   type MusicControlAction,
   type MusicState,
 } from "./music-state";
@@ -53,8 +56,28 @@ interface StoredStatus {
   diagnostics: ClientDiagnostics;
 }
 
-function requiredElement<T extends Element>(selector: string): T {
-  const element = document.querySelector<T>(selector);
+interface TrackControls {
+  card: HTMLElement;
+  label: string;
+  status: HTMLElement;
+  replace: HTMLButtonElement;
+  add: HTMLButtonElement;
+  toggle: HTMLButtonElement;
+  stop: HTMLButtonElement;
+  seek: HTMLInputElement;
+  position: HTMLElement;
+  volume: HTMLInputElement;
+  volumeValue: HTMLOutputElement;
+  legacy: boolean;
+}
+
+interface PendingMusicCommand {
+  action: MusicControlAction;
+  expiresAt: number;
+}
+
+function requiredElement<T extends Element>(selector: string, root: ParentNode = document): T {
+  const element = root.querySelector<T>(selector);
   if (!element) {
     throw new Error(`Elemento obrigatório ausente: ${selector}`);
   }
@@ -72,19 +95,15 @@ const copyButton = requiredElement<HTMLButtonElement>("#copy-diagnostics");
 const copyResult = requiredElement<HTMLElement>("#copy-result");
 const panelTitle = requiredElement<HTMLElement>("h1");
 const musicHeading = requiredElement<HTMLElement>("#music-heading");
-const musicCurrent = requiredElement<HTMLElement>("#music-current");
-const musicToggle = requiredElement<HTMLButtonElement>("#music-toggle");
-const musicCurrentTime = requiredElement<HTMLElement>("#music-current-time");
-const musicProgress = requiredElement<HTMLInputElement>("#music-progress");
-const musicDuration = requiredElement<HTMLElement>("#music-duration");
 const musicStatus = requiredElement<HTMLElement>("#music-status");
+const musicTrackTemplate = requiredElement<HTMLTemplateElement>("#music-track-template");
+const musicTrackList = requiredElement<HTMLElement>("#music-track-list");
+const musicLegacyList = requiredElement<HTMLElement>("#music-legacy-list");
+const musicLegacyStatus = requiredElement<HTMLElement>("#music-legacy-status");
 const musicVolumeInput = requiredElement<HTMLInputElement>("#music-volume");
 const musicVolumeValue = requiredElement<HTMLOutputElement>(
   "#music-volume-value",
 );
-const musicTrackButtons = [
-  ...document.querySelectorAll<HTMLButtonElement>("[data-track-id]"),
-];
 const emfStatus = requiredElement<HTMLElement>("#emf-status");
 const emfHeading = requiredElement<HTMLElement>("#emf-heading");
 const effectsVolumeInput = requiredElement<HTMLInputElement>("#effects-volume");
@@ -94,6 +113,10 @@ const effectsVolumeValue = requiredElement<HTMLOutputElement>(
 const emfButtons = [
   ...document.querySelectorAll<HTMLButtonElement>("[data-emf-id]"),
 ];
+const trackControls = new Map<MusicTrackId, TrackControls>();
+const pendingMusicCommands = new Map<string, PendingMusicCommand>();
+let latestMusicCommandIssuedAt = Number.NEGATIVE_INFINITY;
+const MUSIC_COMMAND_ACK_TIMEOUT_MS = 5_000;
 
 let localConnectionId = "";
 let localName = "";
@@ -102,8 +125,8 @@ const statuses = new Map<string, StoredStatus>();
 let sendingPlay = false;
 let activePlayRequestId: string | undefined;
 let musicState: MusicState | undefined;
-let sendingMusicCommand = false;
-let seekingMusic = false;
+let musicCommandQueue = Promise.resolve();
+let musicCommandError = "";
 let clientsReadyForMusic = false;
 let localPlayerId = "";
 let localVolumes: LocalAudioVolumes = {
@@ -276,88 +299,184 @@ function configurePlayerPanel(): void {
   musicHeading.textContent = "Volume das Trilhas";
   emfHeading.textContent = "Volume dos Efeitos";
   document.body.classList.add("player-panel");
+  trackControls.clear();
+  pendingMusicCommands.clear();
 }
 
-function receiveMusicState(candidate: MusicState): void {
-  if (musicState && compareMusicStates(candidate, musicState) <= 0) {
-    return;
+function receiveMusicState(candidate: MusicState, requestId?: string): void {
+  if (requestId !== undefined) pendingMusicCommands.delete(requestId);
+  if (!musicState || compareMusicStates(candidate, musicState) > 0) {
+    musicState = candidate;
   }
-  musicState = candidate;
-  sendingMusicCommand = false;
-  renderMusic();
   render();
+}
+
+function panelGmTime(state: MusicState | undefined): number {
+  const clock = statuses.get(localConnectionId)?.diagnostics.clock;
+  const offset = state && clock &&
+    state.authorityConnectionId !== localConnectionId &&
+    clock.gmConnectionId === state.authorityConnectionId
+    ? clock.offsetGmMinusLocalMs
+    : 0;
+  return Date.now() + offset;
+}
+
+function musicControlsDisabled(): boolean {
+  return !musicState || sendingPlay || Boolean(activePlayRequestId) ||
+    !clientsReadyForMusic || isCinematicMusicLocked(musicState, panelGmTime(musicState));
+}
+
+function setText(element: HTMLElement, text: string): void {
+  if (element.textContent !== text) element.textContent = text;
+}
+
+function updateMixValue(controls: TrackControls): void {
+  setText(controls.volumeValue, `${controls.volume.value}%`);
+}
+
+function willPlay(trackId: MusicTrackId, playing: boolean): boolean {
+  for (const { action } of pendingMusicCommands.values()) {
+    if (action.type === "REPLACE_TRACK") playing = action.trackId === trackId;
+    else if (action.type === "PLAY_EMF") playing = false;
+    else if ("trackId" in action && action.trackId === trackId) {
+      if (action.type === "PAUSE_LAYER" || action.type === "STOP_LAYER") playing = false;
+      if (action.type === "PLAY_LAYER" || action.type === "ADD_TRACK") playing = true;
+    }
+  }
+  return playing;
+}
+
+function initializeTrackControls(): void {
+  for (const { id, label } of MUSIC_TRACKS) {
+    const fragment = musicTrackTemplate.content.cloneNode(true) as DocumentFragment;
+    const controls: TrackControls = {
+      card: requiredElement(".music-track", fragment),
+      label,
+      status: requiredElement(".track-status", fragment),
+      replace: requiredElement(".track-replace", fragment),
+      add: requiredElement(".track-add", fragment),
+      toggle: requiredElement(".track-toggle", fragment),
+      stop: requiredElement(".track-stop", fragment),
+      seek: requiredElement(".track-seek", fragment),
+      position: requiredElement(".track-position", fragment),
+      volume: requiredElement(".track-volume", fragment),
+      volumeValue: requiredElement(".track-volume-value", fragment),
+      legacy: id === "o-porao" || id === "o-idolo",
+    };
+    setText(requiredElement(".track-name", fragment), label);
+    const seekEnd = getMusicLoop(id).seamSeconds;
+    controls.seek.max = String((Math.ceil(seekEnd * 10) - 1) / 10);
+    setText(requiredElement(".track-duration", fragment), formatTime(seekEnd));
+    controls.seek.setAttribute("aria-label", `Posição de ${label}`);
+    controls.volume.id = `track-volume-${id}`;
+    controls.volume.setAttribute("aria-label", `Volume de mixagem de ${label}`);
+    requiredElement<HTMLLabelElement>(".track-mix-label", fragment).htmlFor = controls.volume.id;
+    controls.volumeValue.htmlFor.add(controls.volume.id);
+    controls.replace.setAttribute("aria-label", `Substituir a mixagem por ${label}`);
+    controls.add.setAttribute("aria-label", `Adicionar ${label} à mixagem`);
+    controls.stop.setAttribute("aria-label", `Parar ${label}`);
+    controls.stop.title = "Parar";
+
+    controls.replace.addEventListener("click", () => sendMusicControl({ type: "REPLACE_TRACK", trackId: id }));
+    controls.add.addEventListener("click", () => sendMusicControl({ type: "ADD_TRACK", trackId: id }));
+    controls.stop.addEventListener("click", () => sendMusicControl({ type: "STOP_LAYER", trackId: id }));
+    controls.toggle.addEventListener("click", () => {
+      const layer = musicState && getMusicLayer(musicState, id);
+      const status = layer && musicLayerStatusAtGm(layer, panelGmTime(musicState));
+      sendMusicControl({ type: willPlay(id, status === "PLAYING") ? "PAUSE_LAYER" : "PLAY_LAYER", trackId: id });
+    });
+    controls.seek.addEventListener("input", () => setText(controls.position, formatTime(controls.seek.valueAsNumber)));
+    controls.seek.addEventListener("change", () => {
+      sendMusicControl({ type: "SEEK_LAYER", trackId: id, positionSeconds: controls.seek.valueAsNumber });
+    });
+    controls.volume.addEventListener("input", () => updateMixValue(controls));
+    controls.volume.addEventListener("change", () => {
+      sendMusicControl({ type: "SET_MIX_VOLUME", trackId: id, volume: controls.volume.valueAsNumber / 100 });
+    });
+
+    trackControls.set(id, controls);
+    (controls.legacy ? musicLegacyList : musicTrackList).append(fragment);
+  }
+}
+
+function renderTrackControls(state: MusicState | undefined, now: number, disabled: boolean): void {
+  const pending = Array.from(pendingMusicCommands.values(), ({ action }) => action).reverse();
+  let legacyPlaying = 0;
+  for (const [trackId, controls] of trackControls) {
+    const layer = state && getMusicLayer(state, trackId);
+    const status = layer ? musicLayerStatusAtGm(layer, now) : "STOPPED";
+    const labels = {
+      PLAYING: "Em reprodução",
+      PAUSING: "Pausando",
+      PAUSED: "Pausada",
+      STOPPING: "Encerrando",
+      STOPPED: "Parada",
+    };
+    const audible = status === "PLAYING" || status === "STOPPING" || status === "PAUSING";
+    const playing = willPlay(trackId, status === "PLAYING");
+    const label = playing ? "Pausar" : "Reproduzir";
+    if (audible && controls.legacy) legacyPlaying += 1;
+    controls.card.dataset.playing = String(audible);
+    setText(controls.status, state ? labels[status] : "Aguardando");
+    setText(controls.toggle, playing ? "⏸" : "▶");
+    controls.toggle.setAttribute("aria-label", `${label} ${controls.label}`);
+    controls.toggle.title = label;
+    controls.replace.disabled = disabled;
+    controls.add.disabled = disabled;
+    controls.toggle.disabled = disabled;
+    controls.stop.disabled = disabled || status === "STOPPED" || status === "STOPPING";
+    controls.seek.disabled = disabled || status === "STOPPING";
+    controls.volume.disabled = disabled;
+
+    const pendingSeek = pending.find((action) => action.type === "SEEK_LAYER" && action.trackId === trackId);
+    if (!controls.seek.matches(":active")) {
+      const position = pendingSeek?.type === "SEEK_LAYER" ? pendingSeek.positionSeconds
+        : layer ? musicLayerPositionAtGm(layer, now) : 0;
+      controls.seek.valueAsNumber = Math.min(position, Number(controls.seek.max));
+      setText(controls.position, formatTime(position));
+    }
+    const pendingVolume = pending.find((action) => action.type === "SET_MIX_VOLUME" && action.trackId === trackId);
+    if (!controls.volume.matches(":active")) {
+      const volume = pendingVolume?.type === "SET_MIX_VOLUME" ? pendingVolume.volume
+        : state ? getMusicMixVolume(state, trackId) : 1;
+      controls.volume.valueAsNumber = Math.round(volume * 100);
+      updateMixValue(controls);
+    }
+  }
+  setText(musicLegacyStatus, legacyPlaying === 0 ? "" : `(${legacyPlaying} em reprodução)`);
 }
 
 function renderMusic(): void {
   const state = musicState;
-  const disabled =
-    state === undefined ||
-    sendingMusicCommand ||
-    Boolean(activePlayRequestId) ||
-    !clientsReadyForMusic ||
-    (state !== undefined && isCinematicMusicLocked(state, Date.now()));
-  musicToggle.disabled = disabled;
-  musicProgress.disabled = disabled;
-  for (const button of musicTrackButtons) {
-    button.disabled = disabled;
-  }
+  const now = panelGmTime(state);
+  const disabled = musicControlsDisabled();
+  renderTrackControls(state, now, disabled);
   for (const button of emfButtons) {
     button.disabled = disabled;
   }
 
-  if (!state) {
-    musicCurrent.textContent = "Carregando faixas…";
-    musicStatus.textContent = "Aguardando estado sincronizado…";
-    emfStatus.textContent = "Aguardando estado sincronizado…";
-    return;
-  }
-
-  const now = Date.now();
-  const track = getMusicTrackConfig(state.trackId);
-  const position = musicPositionAtGm(state, now);
-  const activeEmf = state.emf ? getEmfConfig(state.emf.id) : undefined;
-  const emfPlaying = isEmfActive(state, now);
-  musicCurrent.textContent = track.label;
-  musicToggle.textContent = state.playing ? "⏸" : "▶";
-  musicToggle.setAttribute(
-    "aria-label",
-    state.playing ? "Pausar música" : "Reproduzir música",
-  );
-  musicProgress.max = String(getMusicLoopCycleSeconds(track.id));
-  if (!seekingMusic) {
-    musicProgress.value = String(position);
-    musicCurrentTime.textContent = formatTime(position);
-  }
-  musicDuration.textContent = formatTime(getMusicLoopCycleSeconds(track.id));
-  musicStatus.textContent = !clientsReadyForMusic
+  const activeEmf = state?.emf ? getEmfConfig(state.emf.id) : undefined;
+  const emfPlaying = state !== undefined && isEmfActive(state, now);
+  const message = !state ? "Aguardando estado sincronizado…"
+    : musicCommandError || (!clientsReadyForMusic
     ? "Aguardando áudio e relógios dos clientes…"
-    : sendingMusicCommand
+    : pendingMusicCommands.size > 0
       ? "Sincronizando comando…"
-      : state.mode === "CINEMATIC"
+      : isCinematicMusicLocked(state, now)
         ? "Continuidade automática da cinemática"
-        : state.mode === "EMF"
-          ? `Música parada durante ${activeEmf?.label ?? "EMF"}`
-        : state.playing
-          ? "Reproduzindo em todos os clientes"
-          : "Pausada em todos os clientes";
+        : emfPlaying ? `Trilhas pausadas durante ${activeEmf?.label ?? "EMF"}` : "");
+  setText(musicStatus, message);
 
-  for (const button of musicTrackButtons) {
-    const selected = button.dataset.trackId === state.trackId;
-    button.classList.toggle("selected", selected);
-    button.setAttribute("aria-pressed", String(selected));
-  }
-
-  emfStatus.textContent = sendingMusicCommand
-    ? "Sincronizando comando…"
+  setText(emfStatus, !state ? "Aguardando estado sincronizado…"
     : state.mode !== "EMF" || !activeEmf
       ? "Nenhum EMF em reprodução."
       : now < (state.emf?.startAtGm ?? 0)
         ? `${activeEmf.label} agendado…`
         : emfPlaying
           ? `${activeEmf.label} em reprodução em todos os clientes`
-          : `${activeEmf.label} concluído — silêncio`;
+          : `${activeEmf.label} concluído — silêncio`);
   for (const button of emfButtons) {
-    const selected = emfPlaying && button.dataset.emfId === state.emf?.id;
+    const selected = emfPlaying && button.dataset.emfId === state?.emf?.id;
     button.classList.toggle("selected", selected);
     button.setAttribute("aria-pressed", String(selected));
   }
@@ -420,7 +539,9 @@ function render(): void {
     name.className = "client-name";
     name.textContent = `${participant.name || "Cliente"} (${shortConnectionId(participant.connectionId)})`;
     state.className = "client-state";
-    state.textContent = phaseLabel(status);
+    const playback = status?.diagnostics.musicPlayback;
+    state.textContent = playback === "BLOCKED" ? "áudio bloqueado"
+      : playback === "ERROR" ? "erro de áudio" : phaseLabel(status);
     item.append(dot, name, state);
     clientList.append(item);
   }
@@ -441,7 +562,7 @@ function render(): void {
     sendingPlay ||
     Boolean(activePlayRequestId) ||
     cinematicRunning ||
-    sendingMusicCommand ||
+    pendingMusicCommands.size > 0 ||
     !allMediaReady ||
     !allClocksReady ||
     !musicState;
@@ -507,33 +628,51 @@ async function requestMusicState(): Promise<void> {
   });
 }
 
-async function sendMusicControl(action: MusicControlAction): Promise<void> {
-  if (
-    !musicState ||
-    sendingMusicCommand ||
-    !clientsReadyForMusic ||
-    isCinematicMusicLocked(musicState, Date.now()) ||
-    (await OBR.player.getRole()) !== "GM"
-  ) {
-    return;
-  }
-  sendingMusicCommand = true;
-  renderMusic();
-  const message = protocolMessage<MusicControlMessage>({
-    kind: "MUSIC_CONTROL",
-    requestId: crypto.randomUUID(),
-    issuedAt: Date.now(),
-    action,
-  });
-  try {
-    await OBR.broadcast.sendMessage(BROADCAST_CHANNEL, message, {
-      destination: "ALL",
+function sendMusicControl(action: MusicControlAction): void {
+  if (musicControlsDisabled()) return;
+  const requestId = crypto.randomUUID();
+  pendingMusicCommands.set(requestId, { action, expiresAt: Date.now() + MUSIC_COMMAND_ACK_TIMEOUT_MS });
+  musicCommandError = "";
+  render();
+  musicCommandQueue = musicCommandQueue.then(async () => {
+    if (!pendingMusicCommands.has(requestId)) return;
+    if ((await OBR.player.getRole()) !== "GM" || musicControlsDisabled()) {
+      pendingMusicCommands.delete(requestId);
+      render();
+      return;
+    }
+    latestMusicCommandIssuedAt = Math.max(Date.now(), latestMusicCommandIssuedAt + 1);
+    const message = protocolMessage<MusicControlMessage>({
+      kind: "MUSIC_CONTROL",
+      requestId,
+      issuedAt: latestMusicCommandIssuedAt,
+      action,
     });
-  } catch (error) {
-    sendingMusicCommand = false;
-    renderMusic();
-    throw error;
+    await OBR.broadcast.sendMessage(BROADCAST_CHANNEL, message, { destination: "ALL" });
+  }).catch((error: unknown) => {
+    pendingMusicCommands.delete(requestId);
+    musicCommandError = "Falha ao enviar o comando musical. Tente novamente.";
+    render();
+    console.error("[cinematic-sync] Falha ao enviar comando musical.", error);
+  });
+}
+
+function expireMusicCommands(): boolean {
+  const now = Date.now();
+  let expired = false;
+  for (const [requestId, command] of pendingMusicCommands) {
+    if (now >= command.expiresAt) {
+      pendingMusicCommands.delete(requestId);
+      expired = true;
+    }
   }
+  if (expired) {
+    musicCommandError = "Comando musical sem confirmação. Verifique o estado e tente novamente.";
+    void requestMusicState().catch((error: unknown) => {
+      console.error("[cinematic-sync] Falha ao recuperar estado musical.", error);
+    });
+  }
+  return expired;
 }
 
 async function dispatchPlay(): Promise<void> {
@@ -546,7 +685,7 @@ async function dispatchPlay(): Promise<void> {
       (await OBR.player.getRole()) === "GM" &&
       musicState !== undefined &&
       !isCinematicMusicLocked(musicState, Date.now()) &&
-      !sendingMusicCommand &&
+      pendingMusicCommands.size === 0 &&
       participantList.length > 0 &&
       participantList.every((participant) => {
         const status = statuses.get(participant.connectionId);
@@ -571,6 +710,7 @@ async function dispatchPlay(): Promise<void> {
         (musicState?.revision ?? 0) + 1,
         issuedAt,
         startAtGm,
+        musicState?.mixVolumes,
       ),
     });
     activePlayRequestId = message.requestId;
@@ -613,6 +753,7 @@ async function initialize(): Promise<void> {
     document.body.classList.remove("booting");
     return;
   }
+  initializeTrackControls();
 
   OBR.broadcast.onMessage(BROADCAST_CHANNEL, (event) => {
     if (!isProtocolMessage(event.data)) {
@@ -627,7 +768,7 @@ async function initialize(): Promise<void> {
       event.data.state.authorityConnectionId === event.connectionId &&
       connectionIsGm(event.connectionId)
     ) {
-      receiveMusicState(event.data.state);
+      receiveMusicState(event.data.state, event.data.requestId);
     } else if (
       event.data.kind === "PLAY" &&
       event.data.musicState.authorityConnectionId === event.connectionId &&
@@ -657,51 +798,13 @@ async function initialize(): Promise<void> {
   copyButton.addEventListener("click", () => {
     void copyDiagnostics();
   });
-  musicToggle.addEventListener("click", () => {
-    if (!musicState) return;
-    void sendMusicControl({ type: musicState.playing ? "PAUSE" : "PLAY" }).catch(
-      (error: unknown) => {
-        console.error("[cinematic-sync] Falha no Play/Pause musical.", error);
-      },
-    );
-  });
-  musicProgress.addEventListener("input", () => {
-    seekingMusic = true;
-    musicCurrentTime.textContent = formatTime(Number(musicProgress.value));
-  });
-  musicProgress.addEventListener("change", () => {
-    const positionSeconds = Number(musicProgress.value);
-    seekingMusic = false;
-    void sendMusicControl({ type: "SEEK", positionSeconds }).catch(
-      (error: unknown) => {
-        console.error("[cinematic-sync] Falha no seek musical.", error);
-      },
-    );
-  });
-  for (const button of musicTrackButtons) {
-    button.addEventListener("click", () => {
-      const track = MUSIC_TRACKS.find(
-        (candidate) => candidate.id === button.dataset.trackId,
-      );
-      if (!track) return;
-      void sendMusicControl({ type: "SELECT_TRACK", trackId: track.id }).catch(
-        (error: unknown) => {
-          console.error("[cinematic-sync] Falha ao trocar faixa.", error);
-        },
-      );
-    });
-  }
   for (const button of emfButtons) {
     button.addEventListener("click", () => {
       const emf = EMFS.find(
         (candidate) => candidate.id === button.dataset.emfId,
       );
       if (!emf) return;
-      void sendMusicControl({ type: "PLAY_EMF", emfId: emf.id }).catch(
-        (error: unknown) => {
-          console.error("[cinematic-sync] Falha ao reproduzir EMF.", error);
-        },
-      );
+      sendMusicControl({ type: "PLAY_EMF", emfId: emf.id });
     });
   }
 
@@ -710,7 +813,10 @@ async function initialize(): Promise<void> {
   await sendHello();
   await requestMusicState();
   renderMusic();
-  window.setInterval(renderMusic, 250);
+  window.setInterval(() => {
+    if (expireMusicCommands()) render();
+    else renderMusic();
+  }, 250);
   window.setInterval(() => {
     void sendHello().catch((error: unknown) => {
       console.error("[cinematic-sync] Falha ao atualizar status dos clientes.", error);

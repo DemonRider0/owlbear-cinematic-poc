@@ -8,41 +8,13 @@
     <link rel="stylesheet" href="./src/controls.css" />
   </head>
   <body class="booting">
-    <main id="controls" aria-live="polite">
+    <main id="controls">
       <h1>Cinemática Sincronizada</h1>
 
       <section class="music-panel" aria-labelledby="music-heading">
-        <h2 id="music-heading">Música</h2>
-        <p id="music-current" class="music-current" data-gm-only>Carregando faixas…</p>
-        <div class="music-transport" data-gm-only>
-          <button
-            id="music-toggle"
-            class="music-toggle"
-            type="button"
-            aria-label="Reproduzir música"
-            disabled
-          >
-            ▶
-          </button>
-          <span id="music-current-time" class="music-time">00:00</span>
-          <input
-            id="music-progress"
-            type="range"
-            min="0"
-            max="1"
-            step="0.1"
-            value="0"
-            aria-label="Posição da música"
-            disabled
-          />
-          <span id="music-duration" class="music-time">00:00</span>
-        </div>
-        <div id="music-track-list" class="music-track-list" aria-label="Faixas" data-gm-only>
-          <button type="button" data-track-id="o-porao" disabled>O Porão</button>
-          <button type="button" data-track-id="o-idolo" disabled>O Ídolo</button>
-        </div>
+        <h2 id="music-heading">Trilhas</h2>
         <div class="volume-control">
-          <label for="music-volume">Volume</label>
+          <label for="music-volume">Volume local</label>
           <input
             id="music-volume"
             type="range"
@@ -55,7 +27,38 @@
           />
           <output id="music-volume-value" for="music-volume">100%</output>
         </div>
-        <p id="music-status" class="secondary" data-gm-only>Aguardando estado sincronizado…</p>
+        <div data-gm-only>
+          <p id="music-status" class="secondary" role="status">Aguardando estado sincronizado…</p>
+          <div id="music-track-list" class="music-track-list" aria-label="Faixas da nova mesa"></div>
+          <details class="music-legacy">
+            <summary>Faixas anteriores <span id="music-legacy-status"></span></summary>
+            <div id="music-legacy-list" class="music-track-list"></div>
+          </details>
+          <template id="music-track-template">
+            <article class="music-track">
+              <header class="music-track-header">
+                <h3 class="track-name"></h3>
+                <span class="track-status"></span>
+              </header>
+              <div class="track-actions">
+                <button class="track-replace" type="button" disabled>Substituir</button>
+                <button class="track-add" type="button" disabled>Adicionar</button>
+                <button class="track-toggle" type="button" disabled>▶</button>
+                <button class="track-stop" type="button" disabled>■</button>
+              </div>
+              <div class="track-timeline">
+                <span class="track-position music-time">00:00</span>
+                <input class="track-seek" type="range" min="0" max="1" step="0.1" value="0" disabled />
+                <span class="track-duration music-time"></span>
+              </div>
+              <div class="volume-control track-mix">
+                <label class="track-mix-label">Mixagem</label>
+                <input class="track-volume" type="range" min="0" max="100" step="1" value="100" disabled />
+                <output class="track-volume-value">100%</output>
+              </div>
+            </article>
+          </template>
+        </div>
       </section>
 
       <section class="emf-panel" aria-labelledby="emf-heading">
@@ -66,7 +69,7 @@
           <button type="button" data-emf-id="emf-3" disabled>EMF 3</button>
         </div>
         <div class="volume-control">
-          <label for="effects-volume">Volume</label>
+          <label for="effects-volume">Volume local</label>
           <input
             id="effects-volume"
             type="range"

@@ -8,19 +8,39 @@ export const CINEMATIC_CACHE_PREFIX = `${EXTENSION_ID}/media/`;
 export const CINEMATIC_CACHE_NAME =
   `${CINEMATIC_CACHE_PREFIX}${CINEMATIC_CACHE_VERSION}`;
 
-export type MusicTrackId = "o-porao" | "o-idolo";
+export type MusicTrackId =
+  | "o-porao"
+  | "o-idolo"
+  | "vali-et-ensomt-minne"
+  | "tensao-pressagio"
+  | "tensao-crescente"
+  | "tensao-ruptura"
+  | "perseguicao-frenetica"
+  | "nightfire-ritual"
+  | "what-remains"
+  | "wildfire";
+
+interface MusicLoopConfig {
+  startSeconds: number;
+  endSeconds: number;
+  crossfadeSeconds: number;
+}
 
 export interface MusicTrackConfig {
   id: MusicTrackId;
   label: string;
   url: string;
+  assetVersion?: string;
   // Duração decodificada do asset final. O ciclo runtime é calculado
   // separadamente e não reutiliza o crossfade já incorporado ao arquivo.
   durationSeconds: number;
-  loopPreparation: {
+  loopPreparation?: {
     sourceDurationSeconds: number;
     seamCrossfadeSeconds: number;
   };
+  loop?: MusicLoopConfig;
+  // Limite linear do pico medido no OGG, usado para reservar margem na soma.
+  peak?: number;
 }
 
 export type EmfId = "emf-1" | "emf-2" | "emf-3";
@@ -32,7 +52,7 @@ export interface EmfConfig {
   durationSeconds: number;
 }
 
-export const MUSIC_TRACKS = [
+export const MUSIC_TRACKS: readonly MusicTrackConfig[] = [
   {
     id: "o-porao",
     label: "O Porão",
@@ -53,7 +73,74 @@ export const MUSIC_TRACKS = [
       seamCrossfadeSeconds: 0.007208333,
     },
   },
-] as const satisfies readonly MusicTrackConfig[];
+  {
+    id: "vali-et-ensomt-minne",
+    label: "Vàli · Et Ensomt Minne",
+    url: "./assets/music/vali-et-ensomt-minne.ogg",
+    durationSeconds: 235.460,
+    peak: 0.82,
+    loop: { startSeconds: 195.800, endSeconds: 235.460, crossfadeSeconds: 0.460 },
+  },
+  {
+    id: "tensao-pressagio",
+    label: "Tensão — Presságio",
+    url: "./assets/music/tensao-pressagio.ogg",
+    assetVersion: "v2",
+    durationSeconds: 63.370,
+    peak: 0.79,
+    loop: { startSeconds: 34.230, endSeconds: 63.370, crossfadeSeconds: 0.220 },
+  },
+  {
+    id: "tensao-crescente",
+    label: "Tensão — Crescente",
+    url: "./assets/music/tensao-crescente.ogg",
+    durationSeconds: 70.720,
+    peak: 0.79,
+    loop: { startSeconds: 47.350, endSeconds: 70.720, crossfadeSeconds: 0.240 },
+  },
+  {
+    id: "tensao-ruptura",
+    label: "Tensão — Ruptura",
+    url: "./assets/music/tensao-ruptura.ogg",
+    durationSeconds: 40.570,
+    peak: 0.77,
+    loop: { startSeconds: 22.980, endSeconds: 40.570, crossfadeSeconds: 0.240 },
+  },
+  {
+    id: "perseguicao-frenetica",
+    label: "Perseguição — Frenética",
+    url: "./assets/music/perseguicao-frenetica.ogg",
+    assetVersion: "v2",
+    durationSeconds: 18.640,
+    peak: 0.59,
+    loop: { startSeconds: 10.900, endSeconds: 18.640, crossfadeSeconds: 0.140 },
+  },
+  {
+    id: "nightfire-ritual",
+    label: "Nightfire Ritual",
+    url: "./assets/music/nightfire-ritual.ogg",
+    assetVersion: "v2",
+    durationSeconds: 177.970,
+    peak: 0.86,
+    loop: { startSeconds: 59.290, endSeconds: 177.970, crossfadeSeconds: 0.280 },
+  },
+  {
+    id: "wildfire",
+    label: "Wildfire",
+    url: "./assets/music/wildfire.ogg",
+    durationSeconds: 234.780,
+    peak: 0.83,
+    loop: { startSeconds: 115.600, endSeconds: 234.780, crossfadeSeconds: 0.260 },
+  },
+  {
+    id: "what-remains",
+    label: "What Remains",
+    url: "./assets/music/what-remains.ogg",
+    durationSeconds: 43.640,
+    peak: 0.68,
+    loop: { startSeconds: 15.280, endSeconds: 43.640, crossfadeSeconds: 0.480 },
+  },
+];
 
 export const DEFAULT_MUSIC_TRACK_ID: MusicTrackId = "o-porao";
 export const MUSIC_ASSET_VERSION = "v1";
@@ -83,6 +170,9 @@ export const EMFS = [
 
 export const MUSIC_COMMAND_DELAY_MS = 500;
 export const MUSIC_TRACK_CROSSFADE_MS = 4_000;
+export const MUSIC_LAYER_FADE_MS = 350;
+export const MUSIC_PAUSE_FADE_MS = 4_000;
+export const MUSIC_MIX_RAMP_MS = 200;
 export const MUSIC_LOOP_CROSSFADE_MS = 300;
 export const MUSIC_CINEMATIC_FADE_OUT_MS = 500;
 export const MUSIC_CINEMATIC_FADE_IN_MS = 700;
@@ -175,9 +265,11 @@ export const CINEMATIC_OUTRO_CANDIDATES = [
 
 export const PROTOCOL_VERSION = 2;
 export const BROADCAST_CHANNEL = `${EXTENSION_ID}/protocol/v${PROTOCOL_VERSION}`;
+export const AUDIO_ACTIVATION_CHANNEL = `${EXTENSION_ID}/audio-activation`;
 
 export const TOOL_ID = `${EXTENSION_ID}/tool`;
 export const CONTROL_POPOVER_ID = `${EXTENSION_ID}/controls`;
+export const AUDIO_ACTIVATION_POPOVER_ID = `${EXTENSION_ID}/audio-activation`;
 export const CINEMATIC_MODAL_ID = `${EXTENSION_ID}/cinematic`;
 
 export const PLAY_START_DELAY_MS = 1_500;
@@ -211,17 +303,25 @@ export function getMusicTrackConfig(trackId: MusicTrackId): MusicTrackConfig {
   return track;
 }
 
+export function getMusicLoop(trackId: MusicTrackId) {
+  const config = getMusicTrackConfig(trackId);
+  const loop = config.loop ?? {
+    startSeconds: 0,
+    endSeconds: config.durationSeconds,
+    crossfadeSeconds: MUSIC_LOOP_CROSSFADE_MS / 1_000,
+  };
+  const seamSeconds = loop.endSeconds - loop.crossfadeSeconds;
+  return { ...loop, seamSeconds, cycleSeconds: seamSeconds - loop.startSeconds };
+}
+
 export function getMusicLoopCycleSeconds(trackId: MusicTrackId): number {
-  return (
-    getMusicTrackConfig(trackId).durationSeconds -
-    MUSIC_LOOP_CROSSFADE_MS / 1_000
-  );
+  return getMusicLoop(trackId).cycleSeconds;
 }
 
 export function getMusicTrackRequestUrl(trackId: MusicTrackId): string {
   const track = getMusicTrackConfig(trackId);
   const url = new URL(track.url, window.location.href);
-  url.searchParams.set("music-cache", MUSIC_ASSET_VERSION);
+  url.searchParams.set("music-cache", track.assetVersion ?? MUSIC_ASSET_VERSION);
   return url.href;
 }
 

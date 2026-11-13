@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ativar áudio</title>
+    <link rel="stylesheet" href="./src/controls.css" />
+  </head>
+  <body class="audio-activation">
+    <main>
+      <h1>Áudio da sala</h1>
+      <p id="activation-status" role="status">O navegador pediu sua confirmação para tocar as trilhas.</p>
+      <button id="activate-audio" type="button" disabled>Ativar áudio</button>
+      <button id="open-audio-controls" type="button" disabled>Abrir controles</button>
+    </main>
+    <script type="module" src="./src/audio-activation.ts"></script>
+  </body>
+</html>
