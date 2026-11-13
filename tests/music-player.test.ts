@@ -1059,6 +1059,57 @@ describe("persistent music player", () => {
     expect(voiceB.paused).toBe(true);
   });
 
+  it("keeps the outgoing loop voice audible while the incoming voice is buffering", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const trackId = "perseguicao-frenetica";
+    const playing = issue(initial, { type: "ADD_TRACK", trackId }, 1_500);
+    const loop = getMusicLoop(trackId);
+    player.applyState(playing);
+    const [outgoing, incoming] = trackVoices(trackId);
+    incoming!.deferPlay = true;
+
+    await vi.advanceTimersByTimeAsync(500 + Math.ceil(loop.seamSeconds * 1_000) + MUSIC_GAIN_STEP_MS);
+    expect(outgoing!.paused).toBe(false);
+    expect(outgoing!.volume).toBe(1);
+    expect(incoming!.volume).toBe(0);
+
+    incoming!.finishDeferredPlay();
+    await vi.advanceTimersByTimeAsync(Math.ceil(loop.crossfadeSeconds * 1_000) + MUSIC_GAIN_STEP_MS);
+    expect(outgoing!.paused).toBe(true);
+    expect(incoming!.paused).toBe(false);
+    expect(incoming!.volume).toBe(1);
+  });
+
+  it("keeps a timed-out loop voice from taking over after a new cycle starts", async () => {
+    const player = createPlayer();
+    const initial = createInitialMusicState("gm-1", "initial", 1_000);
+    const trackId = "perseguicao-frenetica";
+    const playing = issue(initial, { type: "ADD_TRACK", trackId }, 1_500);
+    const loop = getMusicLoop(trackId);
+    player.applyState(playing);
+    const [outgoing, incoming] = trackVoices(trackId);
+    incoming!.deferPlay = true;
+
+    await vi.advanceTimersByTimeAsync(500 + Math.ceil(loop.endSeconds * 1_000) + MUSIC_GAIN_STEP_MS);
+    expect(outgoing!.paused).toBe(false);
+    expect(outgoing!.volume).toBe(1);
+    expect(outgoing!.currentTime).toBeGreaterThanOrEqual(loop.startSeconds);
+    expect(outgoing!.currentTime).toBeLessThan(loop.seamSeconds);
+    expect(incoming!.paused).toBe(true);
+
+    incoming!.finishDeferredPlay();
+    incoming!.deferPlay = false;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outgoing!.paused).toBe(false);
+    expect(incoming!.volume).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(Math.ceil(loop.cycleSeconds * 1_000) + MUSIC_GAIN_STEP_MS);
+    expect(outgoing!.paused).toBe(true);
+    expect(incoming!.paused).toBe(false);
+    expect(incoming!.volume).toBe(1);
+  });
+
   it("reconstructs both voices when playback starts inside a loop seam", async () => {
     const player = createPlayer();
     const initial = createInitialMusicState("gm-1", "initial", 1_000);

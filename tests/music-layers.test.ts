@@ -192,10 +192,10 @@ describe("synchronized music layers", () => {
 });
 
 const newTracks = [
-  ["tensao-pressagio", 63.370, 34.230, 0.220],
-  ["tensao-crescente", 70.720, 47.350, 0.240],
-  ["tensao-ruptura", 40.570, 22.980, 0.240],
-  ["perseguicao-frenetica", 12.366009, 8.510, 0.080],
+  ["tensao-pressagio", 63.370, 34.230, 0.220, 63.370],
+  ["tensao-crescente", 70.720, 47.350, 0.240, 70.720],
+  ["tensao-ruptura", 40.570, 22.980, 0.240, 40.570],
+  ["perseguicao-frenetica", 20, 6.575, 0.160, 18.080],
 ] as const;
 
 describe("layered music assets", () => {
@@ -211,9 +211,9 @@ describe("layered music assets", () => {
       .map(({ trackId }) => trackId)).toEqual(["tensao-crescente"]);
   });
 
-  const assets = [...newTracks, ["nightfire-ritual", 177.970, 59.290, 0.280] as const];
+  const assets = [...newTracks, ["nightfire-ritual", 177.970, 59.290, 0.280, 177.970] as const];
 
-  it.each(assets)("matches the Vorbis duration and loop for %s", (id, duration, start, overlap) => {
+  it.each(assets)("matches the Vorbis duration and loop for %s", (id, duration, start, overlap, end) => {
     const config = getMusicTrackConfig(id);
     const ogg = readFileSync(new URL(`../public/assets/music/${id}.ogg`, import.meta.url));
     const identification = 27 + ogg[26]!;
@@ -229,8 +229,9 @@ describe("layered music assets", () => {
       offset += 27 + segments + payload.reduce((sum, length) => sum + length, 0);
     }
     expect(samples / sampleRate).toBeCloseTo(config.durationSeconds, 6);
+    expect(config.durationSeconds).toBe(duration);
     const loop = getMusicLoop(id);
-    expect(loop).toMatchObject({ startSeconds: start, endSeconds: duration, crossfadeSeconds: overlap });
+    expect(loop).toMatchObject({ startSeconds: start, endSeconds: end, crossfadeSeconds: overlap });
     expect(loop.startSeconds).toBeGreaterThanOrEqual(0);
     expect(loop.cycleSeconds).toBeGreaterThan(loop.crossfadeSeconds);
     expect(loop.endSeconds).toBeLessThanOrEqual(config.durationSeconds);

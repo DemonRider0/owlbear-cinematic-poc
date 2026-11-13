@@ -855,7 +855,6 @@ export class MusicPlayer {
     const outgoing = this.activeVoice(deck);
     const incoming = this.inactiveVoice(deck);
     let incomingPlaybackStarted = this.mediaPlayback.get(incoming.element)?.status === "PLAYING";
-    let transitionCompleted = false;
     const completeSwap = (): void => {
       if (!this.isCurrentLoop(deck, timeline, generation)) {
         return;
@@ -866,8 +865,8 @@ export class MusicPlayer {
     };
     deck.activeSlot = incoming.slot;
     deck.loopInProgressUntilGm = seamAtGm + overlapMs;
-    this.setVoiceGain(outgoing, equalPowerOut(progress));
-    this.setVoiceGain(incoming, equalPowerIn(progress));
+    this.setVoiceGain(outgoing, 1);
+    this.setVoiceGain(incoming, 0);
     this.startVoice(
       outgoing,
       loop.seamSeconds + elapsedSeconds,
@@ -882,34 +881,31 @@ export class MusicPlayer {
         (Date.now() - seamAtLocal) / overlapMs,
       );
       incomingPlaybackStarted = true;
+      this.setVoiceGain(outgoing, equalPowerOut(currentProgress));
       this.setVoiceGain(incoming, equalPowerIn(currentProgress));
-      if (transitionCompleted) {
-        this.setPosition(
-          incoming.element,
-          this.positionForTimeline(timeline, this.clock.gmNow()),
-        );
-        completeSwap();
-      }
     });
 
     this.runAbsoluteRamp(
       seamAtLocal,
       overlapMs,
       (nextProgress) => {
-        this.setVoiceGain(outgoing, equalPowerOut(nextProgress));
-        this.setVoiceGain(incoming, equalPowerIn(nextProgress));
+        // play() resolves only after the decoder can actually render audio.
+        // Until then the outgoing voice is the only audible source.
+        if (incomingPlaybackStarted) {
+          this.setVoiceGain(outgoing, equalPowerOut(nextProgress));
+          this.setVoiceGain(incoming, equalPowerIn(nextProgress));
+        }
       },
       () => {
         if (!this.isCurrentLoop(deck, timeline, generation)) {
           return;
         }
-        transitionCompleted = true;
         if (incomingPlaybackStarted) {
           completeSwap();
         } else {
           deck.activeSlot = outgoing.slot;
           this.setVoiceGain(outgoing, 1);
-          this.setVoiceGain(incoming, 0);
+          this.pauseVoice(incoming);
           this.startVoice(
             outgoing,
             this.positionForTimeline(timeline, this.clock.gmNow()),

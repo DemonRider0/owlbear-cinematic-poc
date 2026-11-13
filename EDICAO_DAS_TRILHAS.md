@@ -99,3 +99,17 @@ O GM percebeu a emenda do ciclo de 7,600 s da versão 1.2.0 durante a escuta. A 
 O pulso agudo recorrente fica perto de 0,472 s. Nos sinais reconstruídos em PCM, o intervalo entre os ataques agudos que cercam a emenda passou de cerca de 0,503 s na edição publicada para 0,468 s. A nova sobreposição atravessa a cauda de dois ataques equivalentes, em torno de 8,424 e 12,201 s, e termina antes do próximo acento forte. As alternativas de dois e três motivos avaliadas tinham maior contraste nas notas sustentadas em torno da emenda. A frase mais curta preserva melhor essa textura, embora a repetição possa ficar reconhecível durante uma perseguição longa.
 
 O FFprobe confirmou a duração e o FFmpeg decodificou o OGG completo sem erro. Seis emendas foram simuladas em PCM com curva de potência constante e com os passos de ganho de 40 ms do player. Nenhuma amostra saturou e o pico verdadeiro ficou em −4,8 dBTP. Nos ciclos isolados, o loudness integrado passou de −15,5 para −15,7 LUFS. Na curva contínua, o maior salto entre amostras nas bordas da sobreposição passou de −20,62 para −22,49 dBFS. A simulação com atraso ou adiantamento de 20 ms entre as vozes mostrou sensibilidade ao alinhamento nos passos de ganho. A aprovação auditiva em sala fica com o GM.
+
+## Perseguição — Frenética na versão 1.2.2
+
+O OGG usa os primeiros 20 segundos do MP3 original. A sobreposição atravessa a cauda entre ataques fortes e repete três motivos, preservando a abertura e mais variedade rítmica. Na simulação em PCM, os ataques dominantes ao redor da emenda ficaram separados por cerca de 464 ms, próximos do pulso local de 472 ms. A sobreposição ficou entre os acentos dominantes.
+
+| Duração do OGG (s) | Retorno (s) | Início do crossfade (s) | Crossfade (s) | Fim do crossfade (s) | Ciclo (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 20,000 | 6,575 | 17,920 | 0,160 | 18,080 | 11,345 |
+
+O arquivo da 1.2.1 decodificava até o fim e o retorno estava dentro da mídia. Com 250 ms de atraso simulado na segunda voz em Chrome, a voz de saída perdeu ganho antes de a entrada tocar e chegou ao fim físico do OGG. O nível na emenda caiu a −40,3 dBFS antes da recuperação. Com 220 ms de atraso simulado no temporizador da emenda, o Chrome também registrou silêncio digital até a entrada tocar. A origem do atraso na sala do GM segue sem confirmação.
+
+O player agora mantém o ganho da saída enquanto aguarda a confirmação de reprodução da entrada. Se a entrada perder o prazo, o player cancela essa tentativa e reposiciona a voz de saída na posição sincronizada. A nova mídia reserva 1,920 s de áudio original depois do fim programado do crossfade para evitar que o arquivo acabe durante essa espera. Os tempos da tabela continuam a definir a reprodução normal.
+
+O OGG decodificou integralmente e seis ciclos simulados em PCM passaram sem clipping. Em Chrome local, o player da extensão tocou com o painel fechado por 66 s, incluindo mais de 65 s de áudio solo capturado e cinco emendas. Em todas elas, as janelas de 20 ms medidas após o retorno ficaram acima de −27 dBFS RMS. A edição nova também manteve sinal nas emendas sob os dois atrasos simulados. O console ficou sem erros. Também foram verificados a sobreposição com outra faixa, a pausa e retomada, os seeks, a recuperação a partir de um estado sincronizado e o estado do painel com SDK simulado. A escuta da emenda na sala pública fica com o GM.
