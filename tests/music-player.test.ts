@@ -1059,10 +1059,9 @@ describe("persistent music player", () => {
     expect(voiceB.paused).toBe(true);
   });
 
-  it("keeps the outgoing loop voice audible while the incoming voice is buffering", async () => {
+  it.each(["perseguicao-frenetica", "tensao-ruptura"] as const)("keeps %s audible while the incoming loop voice is buffering", async (trackId) => {
     const player = createPlayer();
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
-    const trackId = "perseguicao-frenetica";
     const playing = issue(initial, { type: "ADD_TRACK", trackId }, 1_500);
     const loop = getMusicLoop(trackId);
     player.applyState(playing);
@@ -1081,10 +1080,9 @@ describe("persistent music player", () => {
     expect(incoming!.volume).toBe(1);
   });
 
-  it("keeps a timed-out loop voice from taking over after a new cycle starts", async () => {
+  it.each(["perseguicao-frenetica", "tensao-ruptura"] as const)("prevents a timed-out %s voice from taking over after a new cycle starts", async (trackId) => {
     const player = createPlayer();
     const initial = createInitialMusicState("gm-1", "initial", 1_000);
-    const trackId = "perseguicao-frenetica";
     const playing = issue(initial, { type: "ADD_TRACK", trackId }, 1_500);
     const loop = getMusicLoop(trackId);
     player.applyState(playing);

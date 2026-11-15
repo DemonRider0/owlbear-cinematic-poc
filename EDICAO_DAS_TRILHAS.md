@@ -113,3 +113,43 @@ O arquivo da 1.2.1 decodificava até o fim e o retorno estava dentro da mídia. 
 O player agora mantém o ganho da saída enquanto aguarda a confirmação de reprodução da entrada. Se a entrada perder o prazo, o player cancela essa tentativa e reposiciona a voz de saída na posição sincronizada. A nova mídia reserva 1,920 s de áudio original depois do fim programado do crossfade para evitar que o arquivo acabe durante essa espera. Os tempos da tabela continuam a definir a reprodução normal.
 
 O OGG decodificou integralmente e seis ciclos simulados em PCM passaram sem clipping. Em Chrome local, o player da extensão tocou com o painel fechado por 66 s, incluindo mais de 65 s de áudio solo capturado e cinco emendas. Em todas elas, as janelas de 20 ms medidas após o retorno ficaram acima de −27 dBFS RMS. A edição nova também manteve sinal nas emendas sob os dois atrasos simulados. O console ficou sem erros. Também foram verificados a sobreposição com outra faixa, a pausa e retomada, os seeks, a recuperação a partir de um estado sincronizado e o estado do painel com SDK simulado. A escuta da emenda na sala pública fica com o GM.
+
+## Tensão — Ruptura: correção na versão 1.2.3
+
+Esta edição substitui os tempos de Ruptura das tabelas anteriores. O primeiro percurso preserva o início do recorte em 142,000 s do MP3 e o crescimento até a seção intensa. O ciclo se concentra numa frase estável antes do desenvolvimento final que o GM percebeu como incompatível com o retorno.
+
+| Intervalo no MP3 (s) | Duração OGG (s) | Retorno (s) | Início do crossfade (s) | Crossfade (s) | Fim do crossfade (s) | Ciclo (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 142,000–172,640 | 30,640 | 23,860 | 29,640 | 0,200 | 29,840 | 5,780 |
+
+Foram comparados ciclos de aproximadamente 5,78 e 11,56 s na parte intensa. A frase curta conserva melhor a textura sustentada e evita acumular o crescimento posterior. A comparação espectral e dos ataques serviu para localizar uma janela entre acentos equivalentes, sem substituir a avaliação musical. No sinal decodificado, o RMS das janelas de 500 ms antes/depois da emenda ficou em −14,34/−14,24 dBFS. A versão anterior voltava de uma passagem com mais energia nos médios e agudos; a nova elimina esse desenvolvimento do ciclo.
+
+O OGG mantém Vorbis estéreo a 44.100 Hz, qualidade 7, ganho fixo de −4,8 dB e rampa de entrada de 8 ms. Suas 1.351.224 amostras por canal correspondem a 30,640 s. Há 0,800 s de mídia original após o fim programado da emenda para dar margem ao início da outra voz. Essa reserva não faz parte do ciclo normal. O MP3 original foi preservado.
+
+Seis emendas simuladas em PCM, tanto com curva contínua quanto com os passos de ganho de 40 ms do player, não apresentaram clipping. As janelas de 100 ms do ciclo ficaram acima de −18,44 dBFS RMS, sem perda progressiva de nível. A aprovação auditiva continua pendente. O player compartilhado da 1.2.2 permanece inalterado; os testes de atraso da voz de entrada também cobrem Ruptura.
+
+## Perseguição — Frenética: correção na versão 1.2.3
+
+O GM rejeitou auditivamente a emenda da 1.2.2, embora a reprodução contínua estivesse funcionando. A análise do trecho mostrou que alinhar o pulso não resolve a mudança do material sustentado: a segunda metade dos primeiros 20 s contém uma subida tonal, e os retornos longos anteriores produziam uma queda perceptível nessa evolução.
+
+Foram comparados retornos com dois e três motivos e outras posições alinhadas aos acentos dentro dos primeiros 20 s. Os retornos próximos de 18–20 s conservaram mais material, mas ligavam texturas diferentes; os pontos posteriores a aproximadamente 18,8 s também tinham maior contraste de energia. A alternativa escolhida antecipa a saída e preserva dois motivos completos. A redução substancial foi apresentada com amostras comparativas e autorizada expressamente pelo GM antes da integração. Essa autorização não equivale a aprovação auditiva da emenda.
+
+| Intervalo no MP3 (s) | Duração OGG (s) | Retorno (s) | Início do crossfade (s) | Crossfade (s) | Fim do crossfade (s) | Ciclo (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0,000–14,580 | 14,580 | 5,870 | 13,440 | 0,140 | 13,580 | 7,570 |
+
+A primeira passagem vai até 13,580 s; o segundo adicional é reserva de mídia para o player e não integra a reprodução normal. O OGG mantém Vorbis estéreo a 44.100 Hz, qualidade 7, ganho de −3,6 dB e rampa inicial de 8 ms. São 642.978 amostras por canal, sem mudança de velocidade, tonalidade ou instrumentos. Não houve concatenação no asset. O original privado manteve seu SHA-256.
+
+O crossfade de 140 ms ocorre entre acentos dominantes, antes do ataque correspondente em aproximadamente 6,058/13,626 s do MP3. A separação desses ataques equivale a cerca de 7,568 s, próxima do ciclo escolhido. A semelhança de cromas em janelas de 1 s nas posições sobrepostas subiu de aproximadamente 0,25 para 0,84; esse indicador apoia a escolha da textura, mas não comprova naturalidade musical. O RMS em janelas de 500 ms antes/depois ficou em −19,10/−20,87 dBFS: ainda existe variação dinâmica e a emenda precisa de avaliação auditiva.
+
+Seis emendas simuladas em PCM, com curva contínua e passos de 40 ms, não apresentaram clipping. O ciclo tem janelas de 100 ms acima de −23,32 dBFS RMS, sem perda progressiva de ganho. A frase mais curta pode ficar reconhecível numa perseguição longa. O player e a correção de buffering da 1.2.2 permanecem intactos. Os caches individuais são `v2` para Ruptura e `v5` para Frenética.
+
+### Validação técnica da versão 1.2.3
+
+Os dois OGGs finais contêm exclusivamente áudio Vorbis estéreo a 44.100 Hz e decodificaram integralmente. O pico verdadeiro foi −3,7 dBTP em Ruptura e −4,8 dBTP em Frenética; os limites conservadores do catálogo foram preservados. Em Ruptura, a queda de aproximadamente 2,93 dB entre as janelas antes/depois da emenda anterior foi substituída por uma variação de +0,10 dB. Em Frenética, a melhora buscada é de textura e frase; a variação de nível da nova emenda não é prova de perfeição auditiva.
+
+No Chrome desktop local, o `MusicPlayer` real reproduziu cada OGG por 66 s solo, com sete emendas e sem painel de controles. A saída efetiva foi capturada com MediaRecorder e analisada em janelas de 20 ms. Após as emendas, os menores níveis medidos foram aproximadamente −21,50 dBFS RMS em Ruptura e −28,13 dBFS RMS em Frenética. Não houve silêncio indevido, eventos `ended`, erros de console ou queda progressiva de ganho. O FFmpeg detectou silêncio somente na preparação inicial das capturas, antes do áudio começar.
+
+As duas execuções também passaram por sobreposição com What Remains, pausa de uma camada, retomada, seek dos dois lados do retorno e através da emenda, Substituir com a faixa já ativa e reconstrução de uma nova instância a partir do estado sincronizado. Os testes locais de Frenética com 250 ms de atraso simulado no `play()` de entrada e 220 ms no temporizador do loop mantiveram sinal e recuperaram o ciclo seguinte; no primeiro caso, a tentativa atrasada foi cancelada como previsto. Nenhum componente compartilhado de reprodução foi modificado.
+
+`npm.cmd run check` passou em typecheck, lint, 80 testes automatizados em oito arquivos e build. `git diff --check` passou. Os outros oito OGGs musicais permaneceram idênticos por SHA-256. Os testes de navegador usaram relógio local e autoplay permitido no Chrome, sem uma sala Owlbear ou Android. Não houve escuta humana pelo Codex; a aprovação musical final das duas emendas permanece com o GM.
